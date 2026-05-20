@@ -1,0 +1,3020 @@
+#!/bin/zsh
+set -euo pipefail
+
+ROOT="${0:A:h:h}"
+NATIVE_APP="$ROOT/BluetoothProbe.app"
+TIMEOUT="${AMARAN_TIMEOUT:-20}"
+NODE_ID="${AMARAN_NODE_ID:-}"
+STATE_PATH="${AMARAN_CLI_STATE_PATH:-$HOME/Library/Application Support/amaran-cli/state.json}"
+ATTENTION_DURATION="${AMARAN_ATTENTION_DURATION:-0}"
+DRY_RUN=0
+VERIFY=0
+ADD_FIXTURE=0
+JSON=0
+CONFIRM_RESET=0
+INTENSITY_OPT=""
+NATIVE_CONTROL_SPEC=""
+CAPTURE_STATE_PATH=""
+
+usage() {
+  cat <<'EOF'
+amaran - local CLI control for amaran fixtures on macOS
+
+Usage:
+  amaran help
+  amaran doctor [--json]
+  amaran pair [--add] [--attention <0-255>] [--dry-run] [--verify] [--json]
+  amaran join-capture --output-state <capture.json> [--timeout <sec>] [--json]
+  amaran state-join <join-state.json> [--json]
+  amaran state-install <source-state.json> [--json]
+  amaran list [--json]
+  amaran probe [--node <id>] [--json]
+  amaran status [--node <id>] [--json]
+  amaran on [--node <id>]
+  amaran off [--node <id>]
+  amaran intensity <0-100> [--node <id>]
+  amaran cct <kelvin> [--intensity <0-100>] [--node <id>]
+
+Diagnostics:
+  amaran gatt-probe [--json]
+  amaran provision-scan [--json]
+  amaran provision-invite-test [--attention <0-255>] [--json]
+  amaran provision-test [--add] [--attention <0-255>] [--json]
+  amaran pair-test [--add] [--attention <0-255>] [--dry-run] [--verify] [--json]
+  amaran proxy-test [--json]
+  amaran sig-onoff-test <on|off> [--node <id>] [--json]
+  amaran control-test <on|off|intensity|cct> [value] [--intensity <0-100>] [--node <id>] [--json]
+  amaran status-test [--node <id>] [--json]
+  amaran configure-test [--node <id>] [--json]
+  amaran config-composition-get-test [--node <id>] [--json]
+  amaran config-appkey-get-test [--node <id>] [--json]
+  amaran config-appkey-add-test [--node <id>] [--json]
+  amaran config-model-app-bind-test [--node <id>] [--json]
+  amaran config-node-reset-test [--dry-run|--confirm-reset] [--node <id>] [--json]
+
+Options:
+  --node <id>        Fixture node address. Defaults to AMARAN_NODE_ID, then the
+                     only fixture in local state.
+  --timeout <sec>    BLE helper timeout. Defaults to AMARAN_TIMEOUT or 20.
+  --attention <sec>  Provisioning Invite attention duration, 0-255 seconds.
+                     Defaults to AMARAN_ATTENTION_DURATION or 0.
+  --add              For pair/provision-test, add an unprovisioned fixture to
+                     the existing studio state instead of creating a new mesh.
+  --state-path <p>   Local CLI state file. Defaults to AMARAN_CLI_STATE_PATH or
+                     ~/Library/Application Support/amaran-cli/state.json.
+  --output-state <p> Secret capture output for join-capture. This file is
+                     created with 0600 permissions and is never printed.
+  --dry-run          For pair, preflight + scan only. For node reset, validate
+                     and print the selected fixture without sending reset.
+  --verify           For pair, read status after provisioning/config.
+  --confirm-reset    Allow destructive Config Node Reset.
+  --json             Print JSON where supported. JSON output must not include
+                     mesh, app, or device keys.
+  --help, -h         Show this help.
+
+Stable runtime commands:
+  list       Read redacted fixture summaries from local state.
+  probe      Connect to the matching Mesh Proxy advertisement.
+  status     Read the vendor CCT status packet.
+  on/off     Send Telink vendor on/off.
+  intensity  Send Telink brightness, 0-100 percent.
+  cct        Send Telink CCT in Kelvin. Without --intensity, reads status first
+             and preserves the current intensity.
+
+State and pairing:
+  doctor         Inspect local state, runtime counters, and control readiness.
+  join-capture   Experimental: advertise this Mac as an unprovisioned Mesh
+                 device so Sidus Link Pro can provision it. Captures NetKey and
+                 the fake node DeviceKey only; AppKey capture is still separate
+                 future work.
+  state-join     Join an existing mesh from externally supplied NetKey/AppKey
+                 metadata for runtime control only.
+  pair           Provision an unprovisioned fixture, configure it for vendor
+                 control, and write local state. Creates the first studio
+                 manifest, or appends with --add.
+  state-install  Validate and install a state file with 0600 permissions.
+
+Diagnostics:
+  gatt-probe                       Discover Mesh Proxy/Provisioning services.
+  provision-scan              Scan for unprovisioned PB-GATT advertisers.
+  provision-invite-test       Send only Provisioning Invite.
+  provision-test              Run PB-GATT provisioning and write/append state.
+  pair-test                   Diagnostic alias for pairing.
+  proxy-test                  Write a public sample Mesh Proxy PDU.
+  sig-onoff-test              Send standard Generic OnOff test PDU.
+  control-test                Send Telink 0x26 control PDU.
+  status-test                 Read Telink 0x26 status.
+  configure-test              Fetch composition, ensure AppKey, bind model.
+  config-*-test               Individual Config Client diagnostics.
+  config-node-reset-test      Dry-run or confirmed destructive node reset.
+
+Environment:
+  AMARAN_CLI_STATE_PATH        Default --state-path.
+  AMARAN_NODE_ID               Default --node.
+  AMARAN_TIMEOUT               Default --timeout.
+  AMARAN_ATTENTION_DURATION    Default --attention.
+
+Pairing a new fixture:
+  1. Factory-reset the fixture, or use a fixture that has never been provisioned.
+  2. For the first fixture, create a new studio state:
+       ./bin/amaran pair --verify
+  3. For each additional fixture, append it to the same studio state:
+       ./bin/amaran pair --add --dry-run
+       ./bin/amaran pair --add --verify
+  4. With multiple fixtures, pass --node <address> or set AMARAN_NODE_ID for
+     runtime commands:
+       ./bin/amaran intensity 18 --node 18
+
+  pair without --add refuses to overwrite an existing state file. pair --add
+  reuses the existing mesh and appends one newly provisioned fixture; it does
+  not remove old fixtures.
+
+Examples:
+  ./bin/amaran doctor
+  ./bin/amaran join-capture --output-state /private/tmp/amaran-sidus-capture.json --timeout 120
+  ./bin/amaran state-join /tmp/sidus-join.json
+  ./bin/amaran pair --dry-run --state-path /tmp/amaran-state.json
+  ./bin/amaran pair --verify --state-path /tmp/amaran-state.json
+  ./bin/amaran pair --add --verify
+  ./bin/amaran list --json
+  ./bin/amaran status
+  ./bin/amaran intensity 18
+  ./bin/amaran cct 5600 --intensity 18
+
+Safety:
+  Runtime commands require local state and use the Bluetooth helper directly.
+  There is no Desktop database import or helper fallback. The state file
+  contains mesh/app/device keys; do not commit, share, print, or log it.
+  state-join requires keys from another provisioner; it does not extract keys
+  from Sidus Link Pro or amaran Desktop.
+  join-capture writes captured keys to the requested --output-state file but
+  does not print them. A provisioning-only capture is not enough for fixture
+  control until the mesh AppKey is also obtained.
+EOF
+}
+
+if [[ $# -eq 0 || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+COMMAND="$1"
+shift
+if [[ "$COMMAND" == "help" ]]; then
+  usage
+  exit 0
+fi
+POSITIONALS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --node)
+      [[ $# -ge 2 ]] || { echo "amaran: --node requires a value" >&2; exit 1; }
+      NODE_ID="$2"
+      shift 2
+      ;;
+    --timeout)
+      [[ $# -ge 2 ]] || { echo "amaran: --timeout requires a value" >&2; exit 1; }
+      TIMEOUT="$2"
+      shift 2
+      ;;
+    --attention)
+      [[ $# -ge 2 ]] || { echo "amaran: --attention requires a value from 0 to 255" >&2; exit 1; }
+      ATTENTION_DURATION="$2"
+      shift 2
+      ;;
+    --state-path)
+      [[ $# -ge 2 ]] || { echo "amaran: --state-path requires a file path" >&2; exit 1; }
+      case "$2" in
+        "~")
+          STATE_PATH="$HOME"
+          ;;
+        "~/"*)
+          STATE_PATH="$HOME/${2#"~/"}"
+          ;;
+        *)
+          STATE_PATH="$2"
+          ;;
+      esac
+      shift 2
+      ;;
+    --output-state|--capture-state)
+      [[ $# -ge 2 ]] || { echo "amaran: --output-state requires a file path" >&2; exit 1; }
+      case "$2" in
+        "~")
+          CAPTURE_STATE_PATH="$HOME"
+          ;;
+        "~/"*)
+          CAPTURE_STATE_PATH="$HOME/${2#"~/"}"
+          ;;
+        *)
+          CAPTURE_STATE_PATH="$2"
+          ;;
+      esac
+      shift 2
+      ;;
+    --intensity)
+      [[ $# -ge 2 ]] || { echo "amaran: --intensity requires a value" >&2; exit 1; }
+      INTENSITY_OPT="$2"
+      shift 2
+      ;;
+    --json)
+      JSON=1
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --verify)
+      VERIFY=1
+      shift
+      ;;
+    --add)
+      ADD_FIXTURE=1
+      shift
+      ;;
+    --confirm-reset)
+      CONFIRM_RESET=1
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --*)
+      echo "amaran: unknown option $1" >&2
+      exit 1
+      ;;
+    *)
+      POSITIONALS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ "$DRY_RUN" == "1" ]]; then
+  case "$COMMAND" in
+    pair|pair-test|config-node-reset-test)
+      ;;
+    *)
+      echo "amaran: --dry-run is only supported for pair and config-node-reset-test" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+if [[ "$VERIFY" == "1" ]]; then
+  case "$COMMAND" in
+    pair|pair-test)
+      ;;
+    *)
+      echo "amaran: --verify is only supported for pair" >&2
+      exit 1
+      ;;
+  esac
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "amaran: --verify cannot be used with --dry-run" >&2
+    exit 1
+  fi
+fi
+
+if [[ "$ADD_FIXTURE" == "1" ]]; then
+  case "$COMMAND" in
+    pair|pair-test|provision-test)
+      ;;
+    *)
+      echo "amaran: --add is only supported for pair, pair-test, and provision-test" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+if [[ "$CONFIRM_RESET" == "1" && "$COMMAND" != "config-node-reset-test" ]]; then
+  echo "amaran: --confirm-reset is only supported for config-node-reset-test" >&2
+  exit 1
+fi
+
+if [[ -n "$CAPTURE_STATE_PATH" && "$COMMAND" != "join-capture" ]]; then
+  echo "amaran: --output-state is only supported for join-capture" >&2
+  exit 1
+fi
+
+if [[ "$DRY_RUN" == "1" && "$CONFIRM_RESET" == "1" && "$COMMAND" == "config-node-reset-test" ]]; then
+  echo "amaran: --dry-run cannot be used with --confirm-reset" >&2
+  exit 1
+fi
+
+launch_app() {
+  local app="$1"
+  shift
+  /usr/bin/open -W "$app" --args "$@"
+}
+
+capture_native_json() {
+  local saved_json="$JSON"
+  JSON=1
+  local captured
+  if captured="$("$@")"; then
+    JSON="$saved_json"
+    print -r -- "$captured"
+    return 0
+  fi
+  local status=$?
+  JSON="$saved_json"
+  return "$status"
+}
+
+native_json_has_appkey_index() {
+  local json_payload="$1"
+  local appkey_index="$2"
+  NATIVE_JSON="$json_payload" /usr/bin/python3 - "$appkey_index" <<'PY'
+import json
+import os
+import sys
+
+target = int(sys.argv[1])
+data = json.loads(os.environ["NATIVE_JSON"])
+for notification in data.get("proxy_notifications", []):
+    config = ((notification.get("access") or {}).get("config") or {})
+    if config.get("message") == "appkey_list":
+        print("1" if target in (config.get("app_key_indexes") or []) else "0")
+        sys.exit(0)
+print("0")
+PY
+}
+
+print_native_appkey_list_summary() {
+  local json_payload="$1"
+  NATIVE_JSON="$json_payload" /usr/bin/python3 - <<'PY'
+import json
+import os
+import sys
+
+data = json.loads(os.environ["NATIVE_JSON"])
+native = data.get("native_send", {})
+for notification in data.get("proxy_notifications", []):
+    config = ((notification.get("access") or {}).get("config") or {})
+    if config.get("message") == "appkey_list":
+        indexes = config.get("app_key_indexes") or []
+        print(
+            "Config AppKey List: "
+            f"address {native.get('address')}, "
+            f"net_key_index {config.get('net_key_index')}, "
+            f"app_key_indexes {','.join(str(item) for item in indexes) if indexes else '(none)'}, "
+            f"status {config.get('status_name')}"
+        )
+        sys.exit(0)
+print("amaran: Config AppKey List response was not received", file=sys.stderr)
+sys.exit(1)
+PY
+}
+
+print_native_configure_json() {
+  COMPOSITION_JSON="$1" \
+  APPKEY_LIST_JSON="$2" \
+  APPKEY_ADD_JSON="$3" \
+  MODEL_BIND_JSON="$4" \
+  /usr/bin/python3 - <<'PY'
+import json
+import os
+
+print(json.dumps({
+    "composition": json.loads(os.environ["COMPOSITION_JSON"]),
+    "appkey_list": json.loads(os.environ["APPKEY_LIST_JSON"]),
+    "appkey_add": json.loads(os.environ["APPKEY_ADD_JSON"]),
+    "model_app_bind": json.loads(os.environ["MODEL_BIND_JSON"]),
+}, indent=2))
+PY
+}
+
+run_direct_doctor() {
+  /usr/bin/python3 - "$JSON" "$STATE_PATH" <<'PY'
+from datetime import datetime, timezone
+import json
+import os
+import sys
+
+raw_json, state_path = sys.argv[1] == "1", os.path.expanduser(sys.argv[2])
+
+def display_path(path):
+    home = os.path.expanduser("~")
+    path = os.path.abspath(os.path.expanduser(path))
+    if path == home:
+        return "~"
+    if path.startswith(home + os.sep):
+        return "~" + path[len(home):]
+    return path
+
+def timestamp_for_file(path):
+    try:
+        timestamp = os.path.getmtime(path)
+    except OSError:
+        return None
+    return datetime.fromtimestamp(timestamp, timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+def normalize_mac(value):
+    return "".join(ch for ch in str(value or "") if ch in "0123456789abcdefABCDEF").upper()
+
+def mac_suffix(value):
+    normalized = normalize_mac(value)
+    return normalized[-6:] if normalized else ""
+
+def fixture_label(fixture):
+    if fixture.get("name"):
+        return str(fixture["name"])
+    code = fixture.get("code")
+    suffix = mac_suffix(fixture.get("mac_address"))
+    if code and suffix:
+        return f"{code}-{suffix}"
+    return suffix or f"fixture-{fixture.get('node_address', 'unknown')}"
+
+def safe_fixture_summary(fixture):
+    return {
+        "name": fixture_label(fixture),
+        "address": fixture.get("node_address"),
+        "mac_suffix": mac_suffix(fixture.get("mac_address")),
+        "code": fixture.get("code"),
+    }
+
+def is_hex_bytes(value, byte_count=None):
+    if not isinstance(value, str):
+        return False
+    value = value.strip()
+    if not value or len(value) % 2 != 0:
+        return False
+    if byte_count is not None and len(value) != byte_count * 2:
+        return False
+    return all(ch in "0123456789abcdefABCDEF" for ch in value)
+
+def int_in_range(value, minimum, maximum):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return False
+    return minimum <= parsed <= maximum
+
+def safe_native_fixture_check(fixture):
+    composition_data = fixture.get("composition_data")
+    composition_bytes = 0
+    if is_hex_bytes(composition_data):
+        composition_bytes = len(composition_data.strip()) // 2
+    has_device_key = is_hex_bytes(fixture.get("device_key"), 16)
+    has_device_uuid = is_hex_bytes(fixture.get("device_uuid"), 16)
+    return {
+        "name": fixture_label(fixture),
+        "address": fixture.get("node_address"),
+        "mac_suffix": mac_suffix(fixture.get("mac_address")),
+        "has_mac_address": bool(mac_suffix(fixture.get("mac_address"))),
+        "has_device_key": has_device_key,
+        "has_device_uuid": has_device_uuid,
+        "config_ready": has_device_key,
+        "control_only": bool(fixture.get("control_only")) or not has_device_key,
+        "has_composition_data": composition_bytes > 0,
+        "composition_data_bytes": composition_bytes,
+    }
+
+def describe_local_state():
+    result = {
+        "path": display_path(state_path),
+        "exists": os.path.exists(state_path),
+        "usable": False,
+    }
+    if not result["exists"]:
+        return result
+    try:
+        with open(state_path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        if payload.get("schema_version") != 1:
+            raise ValueError(f"unsupported state schema version: {payload.get('schema_version')}")
+        fixtures = payload.get("fixtures")
+        if not isinstance(fixtures, list):
+            raise ValueError("state file is missing fixtures data")
+        mesh = payload.get("mesh") if isinstance(payload.get("mesh"), dict) else {}
+        runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
+        source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        fixture_checks = [
+            safe_native_fixture_check(fixture)
+            for fixture in fixtures
+            if isinstance(fixture, dict)
+        ]
+        result.update({
+            "usable": True,
+            "schema_version": payload.get("schema_version"),
+            "synced_at": payload.get("synced_at"),
+            "source_type": source.get("type"),
+            "fixture_count": len(fixtures),
+            "fixtures": [safe_fixture_summary(fixture) for fixture in fixtures if isinstance(fixture, dict)],
+            "runtime": {
+                "source_address": runtime.get("source_address"),
+                "telink_source_address": runtime.get("telink_source_address"),
+                "sequence_next": runtime.get("sequence_next"),
+                "last_reserved_by": runtime.get("last_reserved_by"),
+            },
+            "checks": {
+                "mesh_has_net_key": is_hex_bytes(mesh.get("net_key"), 16),
+                "mesh_has_app_key": is_hex_bytes(mesh.get("app_key"), 16),
+                "runtime_source_address_valid": int_in_range(runtime.get("source_address"), 1, 0x7fff),
+                "runtime_telink_source_address_valid": int_in_range(runtime.get("telink_source_address"), 1, 0x7fff),
+                "runtime_sequence_available": int_in_range(runtime.get("sequence_next"), 0, 0x00fffffe),
+                "fixtures": fixture_checks,
+            },
+        })
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
+
+def describe_native_readiness(state):
+    missing = []
+    warnings = []
+    checks = state.get("checks") or {}
+    fixture_checks = checks.get("fixtures") if isinstance(checks.get("fixtures"), list) else []
+
+    if not state.get("usable"):
+        missing.append("usable local state")
+    else:
+        if state.get("fixture_count", 0) < 1:
+            missing.append("at least one fixture")
+        if not checks.get("mesh_has_net_key"):
+            missing.append("mesh NetKey in local state")
+        if not checks.get("mesh_has_app_key"):
+            missing.append("mesh AppKey in local state")
+        if not checks.get("runtime_source_address_valid"):
+            missing.append("valid Config source address")
+        if not checks.get("runtime_telink_source_address_valid"):
+            missing.append("valid Telink runtime source address")
+        if not checks.get("runtime_sequence_available"):
+            missing.append("available sequence number")
+        if not fixture_checks:
+            missing.append("fixture metadata")
+        else:
+            if any(not item.get("has_device_key") for item in fixture_checks):
+                warnings.append("fixture DeviceKey metadata missing; Config diagnostics and node reset are unavailable for those fixtures")
+            if any(not item.get("has_device_uuid") for item in fixture_checks):
+                warnings.append("fixture device UUID metadata missing for imported fixtures")
+            if any(not item.get("has_composition_data") for item in fixture_checks):
+                warnings.append("composition data missing until configure-test fetches it")
+
+    runtime_ready = not missing
+    if runtime_ready:
+        next_step = "runtime commands are ready"
+    else:
+        next_step = "run ./bin/amaran pair with an unprovisioned fixture, or install a valid local state file with ./bin/amaran state-install"
+
+    pairing = {
+        "available": True,
+        "creates_first_state": not bool(state.get("exists")),
+        "can_add_fixture": bool(state.get("usable")),
+        "requires_unprovisioned_fixture": True,
+        "next_step": (
+            "run ./bin/amaran pair --add --dry-run to scan before adding another fixture to this studio state"
+            if state.get("usable")
+            else "repair/install valid local state before using pair --add"
+            if state.get("exists")
+            else "run ./bin/amaran pair --dry-run before provisioning a factory-reset or unprovisioned fixture"
+        ),
+    }
+
+    return {
+        "runtime_control_ready": runtime_ready,
+        "stable_commands_direct": runtime_ready,
+        "state_source": state.get("source_type"),
+        "missing": missing,
+        "warnings": warnings,
+        "next_step": next_step,
+        "pairing": pairing,
+    }
+
+state = describe_local_state()
+data = {
+    "state": state,
+}
+data["readiness"] = describe_native_readiness(state)
+
+if raw_json:
+    print(json.dumps(data, indent=2))
+else:
+    state = data["state"]
+    state_status = "usable" if state.get("usable") else "missing"
+    if state.get("exists") and not state.get("usable"):
+        state_status = "invalid"
+    print(f"state {state_status}: {state.get('path')}")
+    if state.get("fixture_count") is not None:
+        print(f"fixtures {state['fixture_count']}")
+    runtime = state.get("runtime") or {}
+    if runtime:
+        print(
+            "runtime "
+            f"source {runtime.get('source_address')}, "
+            f"telink_source {runtime.get('telink_source_address')}, "
+            f"sequence_next {runtime.get('sequence_next')}"
+        )
+    readiness = data["readiness"]
+    runtime_status = "ready" if readiness.get("runtime_control_ready") else "not_ready"
+    print(f"runtime {runtime_status}")
+    if not readiness.get("runtime_control_ready"):
+        missing = readiness.get("missing") or []
+        if missing:
+            print("missing " + ", ".join(missing))
+    pairing = readiness.get("pairing") or {}
+    if pairing.get("can_add_fixture"):
+        print("pairing add_ready")
+    elif state.get("exists"):
+        print("pairing blocked_by_invalid_state")
+    else:
+        print("pairing create_ready")
+    print(f"pairing_next {pairing.get('next_step')}")
+    warnings = readiness.get("warnings") or []
+    for warning in warnings:
+        print(f"warning {warning}")
+    print(f"next {readiness.get('next_step')}")
+PY
+}
+
+run_local_state_list() {
+  /usr/bin/python3 - "$JSON" "$STATE_PATH" <<'PY'
+import json
+import os
+import sys
+
+raw_json, state_path = sys.argv[1] == "1", os.path.expanduser(sys.argv[2])
+
+try:
+    with open(state_path, "r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+except FileNotFoundError:
+    print(f"amaran: local state not found at {state_path}", file=sys.stderr)
+    sys.exit(1)
+except Exception as exc:
+    print(f"amaran: local state could not be read ({exc})", file=sys.stderr)
+    sys.exit(1)
+
+if payload.get("schema_version") != 1:
+    print(f"amaran: unsupported state schema version: {payload.get('schema_version')}", file=sys.stderr)
+    sys.exit(1)
+
+fixtures = payload.get("fixtures")
+if not isinstance(fixtures, list):
+    print("amaran: local state is missing fixtures", file=sys.stderr)
+    sys.exit(1)
+
+def normalized_mac(value):
+    return "".join(ch for ch in str(value or "") if ch in "0123456789abcdefABCDEF").upper()
+
+def mac_display(value):
+    normalized = normalized_mac(value)
+    if len(normalized) == 12:
+        return ":".join(normalized[index:index + 2] for index in range(0, 12, 2))
+    return "unknown"
+
+def fixture_name(fixture):
+    if fixture.get("name"):
+        return str(fixture["name"])
+    code = fixture.get("code")
+    suffix = normalized_mac(fixture.get("mac_address"))[-6:]
+    if code and suffix:
+        return f"{code}-{suffix}"
+    if suffix:
+        return suffix
+    return f"fixture-{fixture.get('node_address', 'unknown')}"
+
+safe = [
+    {
+        "name": fixture_name(fixture),
+        "address": fixture.get("node_address"),
+        "mac": mac_display(fixture.get("mac_address")),
+    }
+    for fixture in fixtures
+    if isinstance(fixture, dict)
+]
+
+if raw_json:
+    print(json.dumps(safe, indent=2))
+else:
+    if not safe:
+        print("No fixtures found.")
+    for fixture in safe:
+        print(f"{fixture['name']}\t{fixture['address']}\t{fixture['mac']}")
+PY
+}
+
+run_state_join() {
+  [[ ${#POSITIONALS[@]} -ge 1 ]] || { echo "amaran: state-join requires a join-state JSON file" >&2; exit 1; }
+  local source_path="$POSITIONALS[1]"
+
+  /usr/bin/python3 - "$JSON" "$STATE_PATH" "$source_path" <<'PY'
+import json
+import os
+import sys
+import tempfile
+from datetime import datetime, timezone
+
+raw_json = sys.argv[1] == "1"
+target_path = os.path.abspath(os.path.expanduser(sys.argv[2]))
+source_path = os.path.abspath(os.path.expanduser(sys.argv[3]))
+
+def fail(message):
+    print(f"amaran: {message}", file=sys.stderr)
+    sys.exit(1)
+
+def display_path(path):
+    home = os.path.expanduser("~")
+    path = os.path.abspath(os.path.expanduser(path))
+    if path == home:
+        return "~"
+    if path.startswith(home + os.sep):
+        return "~" + path[len(home):]
+    return path
+
+def is_hex_bytes(value, byte_count=None):
+    if not isinstance(value, str):
+        return False
+    value = value.strip()
+    if not value or len(value) % 2 != 0:
+        return False
+    if byte_count is not None and len(value) != byte_count * 2:
+        return False
+    return all(ch in "0123456789abcdefABCDEF" for ch in value)
+
+def hex_value(value, byte_count, label):
+    if not is_hex_bytes(value, byte_count):
+        fail(f"join state has invalid {label}")
+    return value.strip().lower()
+
+def optional_hex_value(value, byte_count, label):
+    if value in (None, ""):
+        return None
+    return hex_value(value, byte_count, label)
+
+def optional_hex_blob(value, label):
+    if value in (None, ""):
+        return ""
+    if not is_hex_bytes(value):
+        fail(f"join state has invalid {label}")
+    return value.strip().lower()
+
+def int_in_range(value, minimum, maximum, label):
+    try:
+        parsed = int(value, 0) if isinstance(value, str) else int(value)
+    except (TypeError, ValueError):
+        fail(f"join state has invalid {label}")
+    if not minimum <= parsed <= maximum:
+        fail(f"join state has out-of-range {label}")
+    return parsed
+
+def normalize_mac(value):
+    normalized = "".join(ch for ch in str(value or "") if ch in "0123456789abcdefABCDEF").upper()
+    if not normalized:
+        return ""
+    if len(normalized) != 12:
+        fail("join state has invalid fixture mac_address")
+    return ":".join(normalized[index:index + 2] for index in range(0, 12, 2))
+
+def mac_suffix(value):
+    return "".join(ch for ch in str(value or "") if ch in "0123456789abcdefABCDEF").upper()[-6:]
+
+def fixture_label(fixture):
+    if fixture.get("name"):
+        return str(fixture["name"])
+    code = fixture.get("code")
+    suffix = mac_suffix(fixture.get("mac_address"))
+    if code and suffix:
+        return f"{code}-{suffix}"
+    return suffix or f"fixture-{fixture.get('node_address', 'unknown')}"
+
+def safe_fixture_summary(fixture):
+    return {
+        "name": fixture_label(fixture),
+        "address": fixture.get("node_address"),
+        "mac_suffix": mac_suffix(fixture.get("mac_address")),
+        "code": fixture.get("code"),
+        "control_only": bool(fixture.get("control_only")),
+    }
+
+def element_count_for(fixture):
+    value = fixture.get("element_count")
+    if value in (None, ""):
+        return 1
+    return int_in_range(value, 1, 255, "fixture element_count")
+
+def choose_source_address(occupied, destination=None, prefer=3):
+    if prefer not in occupied and prefer != destination:
+        return prefer
+    for candidate in range(4, 0x8000):
+        if candidate not in occupied and candidate != destination:
+            return candidate
+    if 2 not in occupied and 2 != destination:
+        return 2
+    fail("join state could not choose an unused source address")
+
+if not os.path.isfile(source_path):
+    fail(f"join state file not found at {source_path}")
+if os.path.exists(target_path):
+    fail(f"target state file already exists at {target_path}; move it before joining mesh")
+if os.path.abspath(source_path) == os.path.abspath(target_path):
+    fail("source and target state paths must be different")
+
+try:
+    with open(source_path, "r", encoding="utf-8") as fh:
+        source = json.load(fh)
+except json.JSONDecodeError as exc:
+    fail(f"join state file could not be read: invalid JSON at line {exc.lineno} column {exc.colno}")
+except OSError as exc:
+    fail(f"join state file could not be read: {exc}")
+
+if not isinstance(source, dict):
+    fail("join state must contain a JSON object")
+mesh_in = source.get("mesh") if isinstance(source.get("mesh"), dict) else source
+runtime_in = source.get("runtime") if isinstance(source.get("runtime"), dict) else {}
+fixtures_in = source.get("fixtures")
+if not isinstance(fixtures_in, list) or not fixtures_in:
+    fail("join state requires a non-empty fixtures array")
+
+now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+net_key = hex_value(mesh_in.get("net_key"), 16, "mesh net_key")
+app_key = hex_value(mesh_in.get("app_key"), 16, "mesh app_key")
+iv_index = int_in_range(runtime_in.get("iv_index", mesh_in.get("iv_index", source.get("iv_index", 0))), 0, 0xFFFFFFFF, "runtime iv_index")
+sequence_next = int_in_range(runtime_in.get("sequence_next", source.get("sequence_next", 1)), 0, 0x00FFFFFE, "runtime sequence_next")
+
+fixtures = []
+occupied = set()
+for index, item in enumerate(fixtures_in, start=1):
+    if not isinstance(item, dict):
+        fail(f"join state fixture #{index} must be a JSON object")
+    address = int_in_range(item.get("node_address", item.get("address")), 1, 0x7FFF, f"fixture #{index} node_address")
+    element_count = element_count_for(item)
+    for offset in range(element_count):
+        element_address = address + offset
+        if element_address > 0x7FFF:
+            fail(f"join state fixture #{index} element address exceeds unicast range")
+        if element_address in occupied:
+            fail(f"join state has duplicate fixture element address {element_address}")
+        occupied.add(element_address)
+    mac_address = normalize_mac(item.get("mac_address", item.get("mac", "")))
+    device_key = optional_hex_value(item.get("device_key"), 16, f"fixture #{index} device_key")
+    device_uuid = optional_hex_value(item.get("device_uuid"), 16, f"fixture #{index} device_uuid")
+    fixture = {
+        "uuid": str(item.get("uuid") or device_uuid or f"joined-{address}"),
+        "mac_address": mac_address,
+        "code": str(item.get("code") or ""),
+        "name": str(item.get("name") or item.get("label") or ""),
+        "node_address": address,
+        "composition_data": optional_hex_blob(item.get("composition_data"), f"fixture #{index} composition_data"),
+        "element_count": element_count,
+        "update_time": now,
+        "state": 0,
+        "control_only": not bool(device_key),
+    }
+    if device_key:
+        fixture["device_key"] = device_key
+    if device_uuid:
+        fixture["device_uuid"] = device_uuid
+    fixtures.append(fixture)
+
+source_address_value = runtime_in.get("source_address", source.get("source_address"))
+telink_source_value = runtime_in.get("telink_source_address", source.get("telink_source_address"))
+if source_address_value in (None, ""):
+    source_address = choose_source_address(occupied, prefer=3)
+else:
+    source_address = int_in_range(source_address_value, 1, 0x7FFF, "runtime source_address")
+    if source_address in occupied:
+        fail("join state runtime source_address collides with a fixture address")
+
+occupied_with_source = set(occupied)
+occupied_with_source.add(source_address)
+if telink_source_value in (None, ""):
+    telink_source_address = 1 if 1 not in occupied_with_source else choose_source_address(occupied_with_source, prefer=3)
+else:
+    telink_source_address = int_in_range(telink_source_value, 1, 0x7FFF, "runtime telink_source_address")
+    if telink_source_address in occupied:
+        fail("join state runtime telink_source_address collides with a fixture address")
+
+payload = {
+    "schema_version": 1,
+    "synced_at": now,
+    "source": {
+        "type": "mesh_join_import",
+        "joined_at": now,
+        "control_only": any(fixture.get("control_only") for fixture in fixtures),
+    },
+    "mesh": {
+        "uuid": str(mesh_in.get("uuid") or source.get("uuid") or "joined-mesh"),
+        "net_key": net_key,
+        "app_key": app_key,
+        "fixtures_ordered_list": "[]",
+        "scenes_ordered_list": "[]",
+        "update_time": now,
+        "state": 0,
+    },
+    "fixtures": fixtures,
+    "runtime": {
+        "iv_index": iv_index,
+        "source_address": source_address,
+        "telink_source_address": telink_source_address,
+        "sequence_next": sequence_next,
+        "updated_at": now,
+        "last_reserved_by": "state-join",
+    },
+}
+
+directory = os.path.dirname(target_path)
+fd = None
+tmp_path = None
+try:
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=".state-join.", suffix=".json", dir=directory)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_path, target_path)
+    os.chmod(target_path, 0o600)
+except Exception as exc:
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    if tmp_path is not None:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+    fail(f"target state file could not be written: {exc}")
+
+data = {
+    "joined": True,
+    "source_path": display_path(source_path),
+    "target_path": display_path(target_path),
+    "fixture_count": len(fixtures),
+    "fixtures": [safe_fixture_summary(fixture) for fixture in fixtures],
+    "control_only": payload["source"]["control_only"],
+    "runtime": {
+        "iv_index": iv_index,
+        "source_address": source_address,
+        "telink_source_address": telink_source_address,
+        "sequence_next": sequence_next,
+    },
+}
+
+if raw_json:
+    print(json.dumps(data, indent=2))
+else:
+    count = data["fixture_count"]
+    fixture_word = "fixture" if count == 1 else "fixtures"
+    print(f"joined mesh with {count} {fixture_word} at {data['target_path']}")
+    for fixture in data["fixtures"]:
+        suffix = fixture.get("mac_suffix") or "unknown"
+        mode = "control-only" if fixture.get("control_only") else "full"
+        print(f"{fixture['name']}\t{fixture['address']}\t...{suffix}\t{mode}")
+    if data["control_only"]:
+        print("warning: DeviceKeys are missing for at least one fixture; Config diagnostics and node reset are unavailable for those fixtures")
+PY
+}
+
+run_state_install() {
+  [[ ${#POSITIONALS[@]} -ge 1 ]] || { echo "amaran: state-install requires a source state file" >&2; exit 1; }
+  local source_path="$POSITIONALS[1]"
+
+  /usr/bin/python3 - "$JSON" "$STATE_PATH" "$source_path" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+raw_json = sys.argv[1] == "1"
+target_path = os.path.abspath(os.path.expanduser(sys.argv[2]))
+source_path = os.path.abspath(os.path.expanduser(sys.argv[3]))
+
+def display_path(path):
+    home = os.path.expanduser("~")
+    path = os.path.abspath(os.path.expanduser(path))
+    if path == home:
+        return "~"
+    if path.startswith(home + os.sep):
+        return "~" + path[len(home):]
+    return path
+
+def normalize_mac(value):
+    return "".join(ch for ch in str(value or "") if ch in "0123456789abcdefABCDEF").upper()
+
+def mac_suffix(value):
+    normalized = normalize_mac(value)
+    return normalized[-6:] if normalized else ""
+
+def fixture_label(fixture):
+    if fixture.get("name"):
+        return str(fixture["name"])
+    code = fixture.get("code")
+    suffix = mac_suffix(fixture.get("mac_address"))
+    if code and suffix:
+        return f"{code}-{suffix}"
+    return suffix or f"fixture-{fixture.get('node_address', 'unknown')}"
+
+def safe_fixture_summary(fixture):
+    return {
+        "name": fixture_label(fixture),
+        "address": fixture.get("node_address"),
+        "mac_suffix": mac_suffix(fixture.get("mac_address")),
+        "code": fixture.get("code"),
+    }
+
+def is_hex_bytes(value, byte_count):
+    if not isinstance(value, str):
+        return False
+    value = value.strip()
+    if len(value) != byte_count * 2:
+        return False
+    return all(ch in "0123456789abcdefABCDEF" for ch in value)
+
+def int_in_range(value, minimum, maximum):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return False
+    return minimum <= parsed <= maximum
+
+def fail(message):
+    print(f"amaran: {message}", file=sys.stderr)
+    sys.exit(1)
+
+def validate_state_payload(payload):
+    if not isinstance(payload, dict):
+        fail("state file must contain a JSON object")
+    if payload.get("schema_version") != 1:
+        fail(f"unsupported state schema version: {payload.get('schema_version')}")
+    mesh = payload.get("mesh")
+    fixtures = payload.get("fixtures")
+    if not isinstance(mesh, dict):
+        fail("state file is missing mesh data")
+    if not isinstance(fixtures, list):
+        fail("state file is missing fixtures data")
+    runtime = payload.get("runtime")
+    if not isinstance(runtime, dict):
+        fail("state file is missing runtime data")
+    for field in ("uuid", "net_key", "app_key"):
+        if not mesh.get(field):
+            fail(f"state mesh data missing field: {field}")
+    if not is_hex_bytes(mesh.get("net_key"), 16):
+        fail("state mesh data has invalid net_key")
+    if not is_hex_bytes(mesh.get("app_key"), 16):
+        fail("state mesh data has invalid app_key")
+    if not fixtures:
+        fail("state file has no fixtures")
+    for index, fixture in enumerate(fixtures, start=1):
+        if not isinstance(fixture, dict):
+            fail(f"state fixture #{index} must be a JSON object")
+        for field in ("node_address", "device_key", "device_uuid"):
+            if fixture.get(field) in (None, ""):
+                fail(f"state fixture #{index} missing field: {field}")
+        try:
+            address = int(fixture["node_address"])
+        except (TypeError, ValueError):
+            fail(f"state fixture #{index} has invalid node_address")
+        if not 1 <= address <= 0x7FFF:
+            fail(f"state fixture #{index} has non-unicast node_address")
+        if not is_hex_bytes(fixture.get("device_key"), 16):
+            fail(f"state fixture #{index} has invalid device_key")
+        if not is_hex_bytes(fixture.get("device_uuid"), 16):
+            fail(f"state fixture #{index} has invalid device_uuid")
+        composition_data = fixture.get("composition_data")
+        if composition_data not in (None, "") and not is_hex_bytes(composition_data, len(str(composition_data)) // 2):
+            fail(f"state fixture #{index} has invalid composition_data")
+        mac = normalize_mac(fixture.get("mac_address"))
+        if mac and (len(mac) != 12 or any(ch not in "0123456789ABCDEF" for ch in mac)):
+            fail(f"state fixture #{index} has invalid mac_address")
+    if not int_in_range(runtime.get("iv_index"), 0, 0xFFFFFFFF):
+        fail("state runtime data has invalid iv_index")
+    if not int_in_range(runtime.get("source_address"), 1, 0x7FFF):
+        fail("state runtime data has invalid source_address")
+    if not int_in_range(runtime.get("telink_source_address"), 1, 0x7FFF):
+        fail("state runtime data has invalid telink_source_address")
+    if not int_in_range(runtime.get("sequence_next"), 0, 0x00FFFFFE):
+        fail("state runtime data has invalid sequence_next")
+
+if not os.path.isfile(source_path):
+    fail(f"source state file not found at {source_path}")
+if os.path.exists(target_path):
+    fail(f"target state file already exists at {target_path}; move it before installing state")
+if os.path.abspath(source_path) == os.path.abspath(target_path):
+    fail("source and target state paths must be different")
+
+try:
+    with open(source_path, "r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+except json.JSONDecodeError as exc:
+    fail(f"source state file could not be read: invalid JSON at line {exc.lineno} column {exc.colno}")
+except OSError as exc:
+    fail(f"source state file could not be read: {exc}")
+validate_state_payload(payload)
+
+directory = os.path.dirname(target_path)
+fd = None
+tmp_path = None
+try:
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=".state-install.", suffix=".json", dir=directory)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_path, target_path)
+    os.chmod(target_path, 0o600)
+except Exception as exc:
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    if tmp_path is not None:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+    fail(f"target state file could not be written: {exc}")
+
+data = {
+    "installed": True,
+    "source_path": display_path(source_path),
+    "target_path": display_path(target_path),
+    "schema_version": payload.get("schema_version"),
+    "fixture_count": len(payload["fixtures"]),
+    "fixtures": [safe_fixture_summary(fixture) for fixture in payload["fixtures"]],
+}
+
+if raw_json:
+    print(json.dumps(data, indent=2))
+else:
+    count = data["fixture_count"]
+    fixture_word = "fixture" if count == 1 else "fixtures"
+    print(f"installed {count} {fixture_word} to {data['target_path']}")
+    for fixture in data["fixtures"]:
+        suffix = fixture.get("mac_suffix") or "unknown"
+        print(f"{fixture['name']}\t{fixture['address']}\t...{suffix}")
+PY
+}
+
+run_native_probe() {
+  local output
+  output="$(mktemp -t amaran-gatt-probe)"
+
+  launch_app "$NATIVE_APP" --output "$output" --timeout "$TIMEOUT"
+
+  if [[ ! -s "$output" ]]; then
+    rm -f "$output"
+    echo "amaran: BLE probe did not write a result" >&2
+    exit 1
+  fi
+
+  /usr/bin/python3 - "$JSON" "$output" <<'PY'
+import json
+import sys
+
+raw_json, output = sys.argv[1] == "1", sys.argv[2]
+with open(output, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+if not payload.get("ok"):
+    print(f"amaran: {payload.get('error', 'BLE probe failed')}", file=sys.stderr)
+    sys.exit(1)
+
+data = payload.get("data", {})
+if raw_json:
+    print(json.dumps(data, indent=2))
+else:
+    discoveries = data.get("discoveries", [])
+    print(f"bluetooth {data.get('central_state', 'unknown')}, mesh devices {len(discoveries)}")
+    for item in discoveries:
+        roles = ",".join(item.get("mesh_roles") or ["unknown"])
+        name = item.get("name") or "(unnamed)"
+        rssi = item.get("rssi", "?")
+        connected = " connected" if item.get("connected") else ""
+        print(f"{name}\t{roles}\trssi {rssi}{connected}")
+        for service in item.get("services", []):
+            chars = service.get("characteristics", [])
+            char_text = ", ".join(
+                f"{char.get('uuid')}:{char.get('role')}" for char in chars
+            )
+            if char_text:
+                print(f"  service {service.get('uuid')}: {char_text}")
+PY
+  local helper_status=$?
+  rm -f "$output"
+  return "$helper_status"
+}
+
+run_native_state_probe() {
+  local output
+  output="$(mktemp -t amaran-state-probe)"
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --proxy-state-probe)
+  if [[ -n "$NODE_ID" ]]; then
+    args+=(--node "$NODE_ID")
+  fi
+
+  launch_app "$NATIVE_APP" "${args[@]}"
+
+  if [[ ! -s "$output" ]]; then
+    rm -f "$output"
+    echo "amaran: local state probe did not write a result" >&2
+    return 1
+  fi
+
+  /usr/bin/python3 - "$JSON" "$output" <<'PY'
+import json
+import sys
+
+raw_json, output = sys.argv[1] == "1", sys.argv[2]
+with open(output, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+if not payload.get("ok"):
+    print(f"amaran: {payload.get('error', 'local state probe failed')}", file=sys.stderr)
+    sys.exit(1)
+
+data = payload.get("data", {})
+native = data.get("native_send") or {}
+selected_id = data.get("selected_peripheral_id")
+selected = None
+for discovery in data.get("discoveries", []):
+    if discovery.get("id") == selected_id:
+        selected = discovery
+        break
+
+if not data.get("connected") or not selected:
+    print("amaran: no matching Mesh Proxy device found", file=sys.stderr)
+    sys.exit(1)
+
+result = {
+    "ok": True,
+    "backend": "mesh_proxy",
+    "address": native.get("address"),
+    "fixture": native.get("fixture"),
+    "mac_suffix": native.get("mac_suffix"),
+    "peripheral_id": selected_id,
+    "name": selected.get("name"),
+    "rssi": selected.get("rssi"),
+    "proxy_network_match": selected.get("proxy_network_match"),
+}
+
+if raw_json:
+    print(json.dumps(result, indent=2))
+else:
+    suffix = result.get("mac_suffix")
+    tail = f" ...{suffix}" if suffix else " mesh"
+    print(f"connected {result.get('address')}{tail}")
+PY
+  local helper_status=$?
+  rm -f "$output"
+  return "$helper_status"
+}
+
+run_native_probe_preferred() {
+  run_native_state_probe
+}
+
+run_native_provision_scan() {
+  local output
+  output="$(mktemp -t amaran-provision-scan)"
+
+  launch_app "$NATIVE_APP" --output "$output" --timeout "$TIMEOUT" --provisioning-scan
+
+  if [[ ! -s "$output" ]]; then
+    rm -f "$output"
+    echo "amaran: provisioning scan did not write a result" >&2
+    exit 1
+  fi
+
+  /usr/bin/python3 - "$JSON" "$output" <<'PY'
+import json
+import sys
+
+raw_json, output = sys.argv[1] == "1", sys.argv[2]
+with open(output, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+if not payload.get("ok"):
+    print(f"amaran: {payload.get('error', 'provisioning scan failed')}", file=sys.stderr)
+    sys.exit(1)
+
+data = payload.get("data", {})
+if raw_json:
+    print(json.dumps(data, indent=2))
+    sys.exit(0)
+
+discoveries = [
+    item for item in data.get("discoveries", [])
+    if "provisioning" in item or "provisioning" in (item.get("mesh_roles") or [])
+]
+count = len(discoveries)
+device_word = "device" if count == 1 else "devices"
+print(f"bluetooth {data.get('central_state', 'unknown')}, {count} unprovisioned {device_word}")
+if not discoveries:
+    sys.exit(0)
+
+for item in discoveries:
+    provisioning = item.get("provisioning") or {}
+    device_uuid = provisioning.get("device_uuid")
+    if device_uuid and len(device_uuid) > 14:
+        device_uuid = f"{device_uuid[:8]}...{device_uuid[-6:]}"
+    name = item.get("name") or "(unnamed)"
+    rssi = item.get("rssi", "?")
+    parts = [str(name), f"rssi {rssi}"]
+    if device_uuid:
+        parts.append(f"uuid {device_uuid}")
+    if provisioning.get("oob_info"):
+        parts.append(f"oob {provisioning['oob_info']}")
+    print("\t".join(parts))
+    for service in item.get("services", []):
+        chars = service.get("characteristics", [])
+        char_text = ", ".join(
+            f"{char.get('uuid')}:{char.get('role')}" for char in chars
+        )
+        if char_text:
+            print(f"  service {service.get('uuid')}: {char_text}")
+PY
+  local helper_status=$?
+  rm -f "$output"
+  return "$helper_status"
+}
+
+run_native_provision_invite_test() {
+  local output
+  output="$(mktemp -t amaran-provision-invite-test)"
+
+  launch_app "$NATIVE_APP" \
+    --output "$output" \
+    --timeout "$TIMEOUT" \
+    --provisioning-invite-test "$ATTENTION_DURATION"
+
+  if [[ ! -s "$output" ]]; then
+    rm -f "$output"
+    echo "amaran: provisioning invite test did not write a result" >&2
+    exit 1
+  fi
+
+  /usr/bin/python3 - "$JSON" "$output" <<'PY'
+import json
+import sys
+
+raw_json, output = sys.argv[1] == "1", sys.argv[2]
+with open(output, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+if not payload.get("ok"):
+    print(f"amaran: {payload.get('error', 'provisioning invite test failed')}", file=sys.stderr)
+    sys.exit(1)
+
+data = payload.get("data", {})
+if raw_json:
+    print(json.dumps(data, indent=2))
+    sys.exit(0)
+
+capabilities = None
+for notification in data.get("proxy_notifications", []):
+    provisioning = notification.get("provisioning") or {}
+    capabilities = provisioning.get("capabilities")
+    if capabilities:
+        break
+
+if not capabilities:
+    print("amaran: provisioning invite returned no Capabilities PDU", file=sys.stderr)
+    sys.exit(1)
+
+write = data.get("proxy_write", {})
+parts = [
+    f"provisioning invite {write.get('write_type', 'write')} to {write.get('characteristic', '2ADB')}",
+    f"elements {capabilities.get('number_of_elements')}",
+]
+algorithms = capabilities.get("algorithm_flags") or []
+if algorithms:
+    parts.append("algorithms " + ",".join(algorithms))
+if capabilities.get("public_key_oob"):
+    parts.append("public_key_oob")
+if capabilities.get("static_oob_available"):
+    parts.append("static_oob")
+if capabilities.get("output_oob_size"):
+    parts.append(f"output_oob {capabilities['output_oob_size']}")
+if capabilities.get("input_oob_size"):
+    parts.append(f"input_oob {capabilities['input_oob_size']}")
+print(", ".join(parts))
+PY
+  local helper_status=$?
+  rm -f "$output"
+  return "$helper_status"
+}
+
+run_native_provision_test() {
+  if ! ensure_native_onboard_state_path_available "provisioning"; then
+    return 1
+  fi
+
+  local output
+  output="$(mktemp -t amaran-provision-test)"
+
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH")
+  if [[ "$ADD_FIXTURE" == "1" ]]; then
+    args+=(--add-to-existing-state)
+  fi
+  args+=(--provision-test "$ATTENTION_DURATION")
+
+  launch_app "$NATIVE_APP" "${args[@]}"
+
+  if [[ ! -s "$output" ]]; then
+    rm -f "$output"
+    echo "amaran: provision test did not write a result" >&2
+    exit 1
+  fi
+
+  /usr/bin/python3 - "$JSON" "$output" <<'PY'
+import json
+import sys
+
+raw_json, output = sys.argv[1] == "1", sys.argv[2]
+with open(output, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+if not payload.get("ok"):
+    print(f"amaran: {payload.get('error', 'provision test failed')}", file=sys.stderr)
+    sys.exit(1)
+
+data = payload.get("data", {})
+if raw_json:
+    print(json.dumps(data, indent=2))
+    sys.exit(0)
+
+provisioning = data.get("native_provisioning") or {}
+if not provisioning.get("completed") or not provisioning.get("state_written"):
+    print("amaran: provision test did not complete", file=sys.stderr)
+    sys.exit(1)
+
+parts = [
+    f"provisioning complete: {provisioning.get('state_mode', 'create')} address {provisioning.get('node_address')}",
+    f"state {provisioning.get('state_path')}",
+]
+if provisioning.get("device_uuid_suffix"):
+    parts.append(f"uuid ...{provisioning['device_uuid_suffix']}")
+if provisioning.get("proxy_segments_written") is not None:
+    parts.append(f"segments {provisioning['proxy_segments_written']}")
+print(", ".join(parts))
+PY
+  local helper_status=$?
+  rm -f "$output"
+  return "$helper_status"
+}
+
+run_native_join_capture() {
+  [[ -n "$CAPTURE_STATE_PATH" ]] || { echo "amaran: join-capture requires --output-state <file>" >&2; exit 1; }
+  if [[ -e "$CAPTURE_STATE_PATH" ]]; then
+    echo "amaran: capture output already exists at $CAPTURE_STATE_PATH" >&2
+    return 1
+  fi
+
+  local output
+  output="$(mktemp -t amaran-join-capture)"
+
+  launch_app "$NATIVE_APP" \
+    --output "$output" \
+    --timeout "$TIMEOUT" \
+    --join-capture \
+    --capture-state "$CAPTURE_STATE_PATH"
+
+  if [[ ! -s "$output" ]]; then
+    rm -f "$output"
+    echo "amaran: join capture did not write a result" >&2
+    exit 1
+  fi
+
+  /usr/bin/python3 - "$JSON" "$output" <<'PY'
+import json
+import sys
+
+raw_json, output = sys.argv[1] == "1", sys.argv[2]
+with open(output, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+data = payload.get("data", {})
+capture = data.get("join_capture") or {}
+
+if not payload.get("ok"):
+    detail = payload.get("error") or capture.get("error") or "join capture failed"
+    print(f"amaran: {detail}", file=sys.stderr)
+    if raw_json:
+        print(json.dumps(data, indent=2))
+    sys.exit(1)
+
+if raw_json:
+    print(json.dumps(data, indent=2))
+    sys.exit(0)
+
+if not capture.get("completed") or not capture.get("state_written"):
+    print("amaran: join capture did not complete", file=sys.stderr)
+    sys.exit(1)
+
+parts = [
+    "join capture complete",
+    f"address {capture.get('node_address')}",
+    f"state {capture.get('capture_state_path')}",
+    "app_key no",
+]
+if capture.get("device_uuid_suffix"):
+    parts.append(f"uuid ...{capture['device_uuid_suffix']}")
+print(", ".join(parts))
+if not capture.get("service_data_advertised"):
+    print("warning: macOS rejected BLE service-data advertising; Sidus Link accepted the fallback advertisement this time")
+print("next: AppKey is still needed before this can become a usable runtime state file")
+PY
+  local helper_status=$?
+  rm -f "$output"
+  return "$helper_status"
+}
+
+print_native_provision_summary_from_json() {
+  local provision_json="$1"
+  PROVISION_JSON="$provision_json" /usr/bin/python3 - <<'PY'
+import json
+import os
+
+data = json.loads(os.environ["PROVISION_JSON"])
+provisioning = data.get("native_provisioning") or {}
+parts = [
+    f"provisioning complete: {provisioning.get('state_mode', 'create')} address {provisioning.get('node_address')}",
+    f"state {provisioning.get('state_path')}",
+]
+if provisioning.get("device_uuid_suffix"):
+    parts.append(f"uuid ...{provisioning['device_uuid_suffix']}")
+if provisioning.get("proxy_segments_written") is not None:
+    parts.append(f"segments {provisioning['proxy_segments_written']}")
+print(", ".join(parts))
+PY
+}
+
+node_id_from_provision_json() {
+  local provision_json="$1"
+  PROVISION_JSON="$provision_json" /usr/bin/python3 - <<'PY'
+import json
+import os
+
+data = json.loads(os.environ["PROVISION_JSON"])
+provisioning = data.get("native_provisioning") or {}
+node = provisioning.get("node_address")
+print("" if node in (None, "") else node)
+PY
+}
+
+native_onboard_state_path_check() {
+  /usr/bin/python3 - "$STATE_PATH" "$ADD_FIXTURE" <<'PY'
+import json
+import os
+import shutil
+import sys
+import tempfile
+
+state_path = os.path.abspath(os.path.expanduser(sys.argv[1]))
+add_to_existing = sys.argv[2] == "1"
+parent = os.path.dirname(state_path) or "."
+parent = os.path.abspath(parent)
+
+def emit(**kwargs):
+    base = {
+        "state_path": state_path,
+        "add_to_existing_state": add_to_existing,
+        "state_path_available": False,
+        "state_path_writable": False,
+        "blocked_by_existing_state": False,
+        "blocked_by_missing_state": False,
+        "existing_fixture_count": None,
+        "parent_path": parent,
+        "parent_exists": os.path.isdir(parent),
+    }
+    base.update(kwargs)
+    print(json.dumps(base))
+
+def is_hex_bytes(value, byte_count):
+    if not isinstance(value, str):
+        return False
+    value = value.strip()
+    return len(value) == byte_count * 2 and all(ch in "0123456789abcdefABCDEF" for ch in value)
+
+def int_in_range(value, minimum, maximum):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return False
+    return minimum <= parsed <= maximum
+
+def validate_existing_payload(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("state file must contain a JSON object")
+    if payload.get("schema_version") != 1:
+        raise ValueError(f"unsupported state schema version: {payload.get('schema_version')}")
+    mesh = payload.get("mesh")
+    fixtures = payload.get("fixtures")
+    runtime = payload.get("runtime")
+    if not isinstance(mesh, dict):
+        raise ValueError("state file is missing mesh data")
+    if not isinstance(fixtures, list) or not fixtures:
+        raise ValueError("state file is missing fixtures data")
+    if not isinstance(runtime, dict):
+        raise ValueError("state file is missing runtime data")
+    if not mesh.get("uuid"):
+        raise ValueError("state mesh data missing field: uuid")
+    if not is_hex_bytes(mesh.get("net_key"), 16):
+        raise ValueError("state mesh data has invalid net_key")
+    if not is_hex_bytes(mesh.get("app_key"), 16):
+        raise ValueError("state mesh data has invalid app_key")
+    if not int_in_range(runtime.get("iv_index"), 0, 0xFFFFFFFF):
+        raise ValueError("state runtime data has invalid iv_index")
+    if not int_in_range(runtime.get("source_address"), 1, 0x7FFF):
+        raise ValueError("state runtime data has invalid source_address")
+    if not int_in_range(runtime.get("telink_source_address"), 1, 0x7FFF):
+        raise ValueError("state runtime data has invalid telink_source_address")
+    if not int_in_range(runtime.get("sequence_next"), 0, 0x00FFFFFE):
+        raise ValueError("state runtime data has invalid sequence_next")
+    for index, fixture in enumerate(fixtures, start=1):
+        if not isinstance(fixture, dict):
+            raise ValueError(f"state fixture #{index} must be a JSON object")
+        if not int_in_range(fixture.get("node_address"), 1, 0x7FFF):
+            raise ValueError(f"state fixture #{index} has invalid node_address")
+        if not is_hex_bytes(fixture.get("device_key"), 16):
+            raise ValueError(f"state fixture #{index} has invalid device_key")
+        if not is_hex_bytes(fixture.get("device_uuid"), 16):
+            raise ValueError(f"state fixture #{index} has invalid device_uuid")
+    return fixtures
+
+def probe_parent_writable():
+    if not os.path.isdir(parent):
+        return False, "state parent path does not exist"
+    try:
+        fd, probe_path = tempfile.mkstemp(prefix=".amaran-state-write-test.", dir=parent)
+        os.close(fd)
+        os.unlink(probe_path)
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+if add_to_existing:
+    if not os.path.exists(state_path):
+        emit(blocked_by_missing_state=True, error="state file does not exist")
+        sys.exit(0)
+    if not os.path.isfile(state_path):
+        emit(error="state path exists and is not a file")
+        sys.exit(0)
+    try:
+        with open(state_path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        fixtures = validate_existing_payload(payload)
+    except json.JSONDecodeError as exc:
+        emit(error=f"state file is invalid JSON at line {exc.lineno} column {exc.colno}")
+        sys.exit(0)
+    except Exception as exc:
+        emit(error=str(exc))
+        sys.exit(0)
+    writable, error = probe_parent_writable()
+    if not writable:
+        emit(error=error or "state parent path is not writable")
+        sys.exit(0)
+    emit(
+        state_path_available=True,
+        state_path_writable=True,
+        existing_fixture_count=len(fixtures),
+    )
+    sys.exit(0)
+
+if os.path.exists(state_path):
+    emit(
+        blocked_by_existing_state=True,
+        error="state file already exists",
+    )
+    sys.exit(0)
+
+if os.path.exists(parent) and not os.path.isdir(parent):
+    emit(error="state parent path exists and is not a directory")
+    sys.exit(0)
+
+cursor = parent
+while not os.path.exists(cursor):
+    next_cursor = os.path.dirname(cursor)
+    if next_cursor == cursor:
+        break
+    cursor = next_cursor
+
+if not os.path.isdir(cursor):
+    emit(error="no writable parent directory found")
+    sys.exit(0)
+
+temp_root = None
+try:
+    if os.path.isdir(parent):
+        probe_dir = parent
+    else:
+        temp_root = tempfile.mkdtemp(prefix=".amaran-state-preflight.", dir=cursor)
+        relative_parent = os.path.relpath(parent, cursor)
+        probe_dir = os.path.join(temp_root, relative_parent)
+        os.makedirs(probe_dir, exist_ok=True)
+
+    fd, probe_path = tempfile.mkstemp(prefix=".amaran-state-write-test.", dir=probe_dir)
+    os.close(fd)
+    os.unlink(probe_path)
+    emit(
+        state_path_available=True,
+        state_path_writable=True,
+        parent_creatable=not os.path.isdir(parent),
+    )
+except Exception as exc:
+    emit(error=str(exc))
+finally:
+    if temp_root:
+        shutil.rmtree(temp_root, ignore_errors=True)
+PY
+}
+
+print_onboard_state_path_unavailable() {
+  local check_json="$1"
+  STATE_PATH_CHECK_JSON="$check_json" /usr/bin/python3 - "$JSON" <<'PY'
+import json
+import os
+import sys
+
+raw_json = sys.argv[1] == "1"
+check = json.loads(os.environ["STATE_PATH_CHECK_JSON"])
+blocked = bool(check.get("blocked_by_existing_state"))
+missing = bool(check.get("blocked_by_missing_state"))
+adding = bool(check.get("add_to_existing_state"))
+state_path = check.get("state_path")
+error = check.get("error") or "state path is not writable"
+if adding and missing:
+    next_step = "run ./bin/amaran pair first to create studio state, or remove --add"
+elif adding:
+    next_step = "repair or install a valid writable state before adding a fixture"
+elif blocked:
+    next_step = "use ./bin/amaran pair --add to add a fixture to this studio state, or set --state-path for a separate mesh"
+else:
+    next_step = "choose a writable --state-path before pairing"
+data = dict(check)
+data.update({
+    "ready": False,
+    "unprovisioned_count": None,
+    "next_step": next_step,
+})
+
+if raw_json:
+    print(json.dumps(data, indent=2))
+else:
+    if adding and missing:
+        print(f"pair add preflight: missing existing state at {state_path}")
+    elif adding:
+        print(f"pair add preflight: state is not usable at {state_path}")
+        print(f"error: {error}")
+    elif blocked:
+        print(f"pair preflight: existing studio state at {state_path}")
+    else:
+        print(f"pair preflight: state path is not writable at {state_path}")
+        print(f"error: {error}")
+    print(f"next: {next_step}")
+PY
+}
+
+ensure_native_onboard_state_path_available() {
+  local context="${1:-pairing}"
+  local check_json
+  check_json="$(native_onboard_state_path_check)"
+  STATE_PATH_CHECK_JSON="$check_json" /usr/bin/python3 - "$context" <<'PY'
+import json
+import os
+import sys
+
+context = sys.argv[1]
+check = json.loads(os.environ["STATE_PATH_CHECK_JSON"])
+if check.get("state_path_available") and check.get("state_path_writable"):
+    sys.exit(0)
+
+state_path = check.get("state_path")
+if check.get("add_to_existing_state") and check.get("blocked_by_missing_state"):
+    print(
+        f"amaran: existing state is required at {state_path} before adding a fixture; "
+        "run pair once without --add to create studio state",
+        file=sys.stderr,
+    )
+elif check.get("add_to_existing_state"):
+    detail = check.get("error") or "state path is not writable"
+    print(
+        f"amaran: existing state is not usable at {state_path} ({detail}); "
+        "repair or install valid state before adding a fixture",
+        file=sys.stderr,
+    )
+elif check.get("blocked_by_existing_state"):
+    print(
+        f"amaran: state file already exists at {state_path}; "
+        f"pass --add to append a fixture or set --state-path before {context}",
+        file=sys.stderr,
+    )
+else:
+    detail = check.get("error") or "state path is not writable"
+    print(
+        f"amaran: state path is not writable at {state_path} ({detail}); "
+        f"choose a writable --state-path before {context}",
+        file=sys.stderr,
+    )
+sys.exit(1)
+PY
+}
+
+run_native_onboard_preflight() {
+  local state_check_json
+  state_check_json="$(native_onboard_state_path_check)"
+  if ! STATE_PATH_CHECK_JSON="$state_check_json" /usr/bin/python3 - <<'PY'
+import json
+import os
+import sys
+
+check = json.loads(os.environ["STATE_PATH_CHECK_JSON"])
+sys.exit(0 if check.get("state_path_available") and check.get("state_path_writable") else 1)
+PY
+  then
+    print_onboard_state_path_unavailable "$state_check_json"
+    return 0
+  fi
+
+  local scan_json
+  local error_output
+  error_output="$(mktemp -t amaran-pair-preflight-error)"
+  if ! scan_json="$(capture_native_json run_native_provision_scan 2>"$error_output")"; then
+    cat "$error_output" >&2
+    rm -f "$error_output"
+    return 1
+  fi
+  rm -f "$error_output"
+
+  SCAN_JSON="$scan_json" STATE_PATH_CHECK_JSON="$state_check_json" /usr/bin/python3 - "$JSON" "$STATE_PATH" <<'PY'
+import json
+import os
+import sys
+
+raw_json, state_path = sys.argv[1] == "1", os.path.expanduser(sys.argv[2])
+state_check = json.loads(os.environ["STATE_PATH_CHECK_JSON"])
+scan = json.loads(os.environ["SCAN_JSON"])
+discoveries = scan.get("discoveries") or []
+count = len(discoveries)
+ready = count > 0
+adding = bool(state_check.get("add_to_existing_state"))
+existing_count = state_check.get("existing_fixture_count")
+if ready and adding:
+    next_step = "run ./bin/amaran pair --add to append and configure the unprovisioned fixture"
+elif ready:
+    next_step = "run ./bin/amaran pair to provision and configure the unprovisioned fixture"
+elif adding:
+    next_step = "factory-reset a fixture or bring an unprovisioned fixture nearby, then rerun pair --add --dry-run"
+else:
+    next_step = "factory-reset a fixture or bring an unprovisioned fixture nearby, then rerun pair --dry-run"
+data = dict(state_check)
+data.update({
+    "state_path": state_path,
+    "state_path_available": True,
+    "state_path_writable": True,
+    "ready": ready,
+    "unprovisioned_count": count,
+    "central_state": scan.get("central_state"),
+    "next_step": next_step,
+    "scan": scan,
+})
+
+if raw_json:
+    print(json.dumps(data, indent=2))
+else:
+    device_word = "fixture" if count == 1 else "fixtures"
+    if adding:
+        print(f"pair add preflight: existing studio state at {state_path}")
+        print(f"existing fixtures {existing_count}")
+    else:
+        print(f"pair preflight: state path available at {state_path}")
+    print("state path writable yes")
+    print(f"bluetooth {scan.get('central_state', 'unknown')}, {count} unprovisioned {device_word}")
+    print(f"ready {'yes' if ready else 'no'}")
+    print(f"next: {data['next_step']}")
+PY
+}
+
+run_native_onboard_test() {
+  if [[ "$DRY_RUN" == "1" ]]; then
+    run_native_onboard_preflight
+    return
+  fi
+
+  if ! ensure_native_onboard_state_path_available "pairing"; then
+    return 1
+  fi
+
+  local provision_json
+  local configure_json
+  local verify_json
+
+  if ! provision_json="$(capture_native_json run_native_provision_test)"; then
+    return 1
+  fi
+  local provisioned_node_id
+  provisioned_node_id="$(node_id_from_provision_json "$provision_json")"
+  if [[ -n "$provisioned_node_id" ]]; then
+    NODE_ID="$provisioned_node_id"
+  fi
+
+  if [[ "$JSON" == "1" ]]; then
+    sleep 3
+    if ! configure_json="$(capture_native_configure_json_with_retry)"; then
+      return 1
+    fi
+    if [[ "$VERIFY" == "1" ]]; then
+      if ! verify_json="$(capture_native_json run_native_status_app status)"; then
+        return 1
+      fi
+      PROVISION_JSON="$provision_json" CONFIGURE_JSON="$configure_json" VERIFY_JSON="$verify_json" /usr/bin/python3 - <<'PY'
+import json
+import os
+
+print(json.dumps({
+    "provision": json.loads(os.environ["PROVISION_JSON"]),
+    "configure": json.loads(os.environ["CONFIGURE_JSON"]),
+    "verify": json.loads(os.environ["VERIFY_JSON"]),
+}, indent=2))
+PY
+    else
+      PROVISION_JSON="$provision_json" CONFIGURE_JSON="$configure_json" /usr/bin/python3 - <<'PY'
+import json
+import os
+
+print(json.dumps({
+    "provision": json.loads(os.environ["PROVISION_JSON"]),
+    "configure": json.loads(os.environ["CONFIGURE_JSON"]),
+}, indent=2))
+PY
+    fi
+    return
+  fi
+
+  print_native_provision_summary_from_json "$provision_json"
+  echo "waiting for Mesh Proxy..."
+  sleep 3
+  if run_native_configure_with_retry; then
+    if [[ "$VERIFY" == "1" ]]; then
+      echo "verifying status..."
+      if run_native_status_app status; then
+        echo "pairing complete"
+        return 0
+      fi
+
+      echo "amaran: pairing configured state, but status verification failed; retry ./bin/amaran status --state-path \"$STATE_PATH\"" >&2
+      return 1
+    fi
+
+    echo "pairing complete"
+    return 0
+  fi
+
+  echo "amaran: provisioning completed, but configuration failed; retry ./bin/amaran configure-test" >&2
+  return 1
+}
+
+run_native_proxy_test() {
+  local output
+  output="$(mktemp -t amaran-proxy-test)"
+
+  launch_app "$NATIVE_APP" --output "$output" --timeout "$TIMEOUT" --proxy-test
+
+  if [[ ! -s "$output" ]]; then
+    rm -f "$output"
+    echo "amaran: proxy test did not write a result" >&2
+    exit 1
+  fi
+
+  /usr/bin/python3 - "$JSON" "$output" <<'PY'
+import json
+import sys
+
+raw_json, output = sys.argv[1] == "1", sys.argv[2]
+with open(output, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+if not payload.get("ok"):
+    print(f"amaran: {payload.get('error', 'proxy test failed')}", file=sys.stderr)
+    sys.exit(1)
+
+data = payload.get("data", {})
+if raw_json:
+    print(json.dumps(data, indent=2))
+else:
+    write = data.get("proxy_write", {})
+    status = "completed" if write.get("completed") else "not completed"
+    print(
+        f"proxy write {status}: "
+        f"{write.get('bytes', 0)} bytes to {write.get('characteristic', '2ADD')}, "
+        f"notifications {write.get('notification_count', 0)}"
+    )
+PY
+  local helper_status=$?
+  rm -f "$output"
+  return "$helper_status"
+}
+
+run_native_sig_onoff_test() {
+  local value="$1"
+  local output
+  output="$(mktemp -t amaran-sig-onoff-test)"
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --sig-onoff-test "$value")
+  if [[ -n "$NODE_ID" ]]; then
+    args+=(--node "$NODE_ID")
+  fi
+
+  launch_app "$NATIVE_APP" "${args[@]}"
+
+  if [[ ! -s "$output" ]]; then
+    rm -f "$output"
+    echo "amaran: SIG on/off test did not write a result" >&2
+    exit 1
+  fi
+
+  /usr/bin/python3 - "$JSON" "$output" <<'PY'
+import json
+import sys
+
+raw_json, output = sys.argv[1] == "1", sys.argv[2]
+with open(output, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+if not payload.get("ok"):
+    print(f"amaran: {payload.get('error', 'SIG on/off test failed')}", file=sys.stderr)
+    sys.exit(1)
+
+data = payload.get("data", {})
+if raw_json:
+    print(json.dumps(data, indent=2))
+else:
+    write = data.get("proxy_write", {})
+    native = data.get("native_send", {})
+    state = "on" if native.get("onoff") else "off"
+    print(
+        f"SIG on/off test sent {state}: "
+        f"address {native.get('address')}, "
+        f"sequence {native.get('sequence')}, "
+        f"notifications {write.get('notification_count', 0)}"
+    )
+PY
+  local helper_status=$?
+  rm -f "$output"
+  return "$helper_status"
+}
+
+build_native_control_spec() {
+  local action="$1"
+  case "$action" in
+    on|off)
+      NATIVE_CONTROL_SPEC="$action"
+      ;;
+    intensity)
+      [[ $# -ge 2 ]] || { echo "amaran: control-test intensity requires a value from 0 to 100" >&2; exit 1; }
+      NATIVE_CONTROL_SPEC="intensity:$2"
+      ;;
+    cct)
+      [[ $# -ge 2 ]] || { echo "amaran: control-test cct requires a kelvin value" >&2; exit 1; }
+      [[ -n "$INTENSITY_OPT" ]] || { echo "amaran: control-test cct requires --intensity <0-100>" >&2; exit 1; }
+      NATIVE_CONTROL_SPEC="cct:$2:$INTENSITY_OPT:10:0"
+      ;;
+    *)
+      echo "amaran: control-test requires on, off, intensity, or cct" >&2
+      exit 1
+      ;;
+  esac
+}
+
+run_native_control_app() {
+  local spec="$1"
+  local output_style="${2:-test}"
+  local output
+  output="$(mktemp -t amaran-control-test)"
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --control-test "$spec")
+  if [[ -n "$NODE_ID" ]]; then
+    args+=(--node "$NODE_ID")
+  fi
+
+  launch_app "$NATIVE_APP" "${args[@]}"
+
+  if [[ ! -s "$output" ]]; then
+    rm -f "$output"
+    echo "amaran: control test did not write a result" >&2
+    exit 1
+  fi
+
+  /usr/bin/python3 - "$JSON" "$output_style" "$output" <<'PY'
+import json
+import sys
+
+raw_json, output_style, output = sys.argv[1] == "1", sys.argv[2], sys.argv[3]
+with open(output, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+if not payload.get("ok"):
+    data = payload.get("data", {})
+    detail = payload.get("error")
+    if not detail and data.get("central_state"):
+        detail = f"control test failed (central_state {data['central_state']})"
+    if not detail:
+        detail = "control test failed"
+    print(f"amaran: {detail}", file=sys.stderr)
+    sys.exit(1)
+
+data = payload.get("data", {})
+if raw_json or output_style == "json":
+    print(json.dumps(data, indent=2))
+elif output_style == "test":
+    write = data.get("proxy_write", {})
+    native = data.get("native_send", {})
+    command = native.get("control_command", "control")
+    print(
+        f"control test sent {command}: "
+        f"address {native.get('address')}, "
+        f"sequence {native.get('sequence')}, "
+        f"notifications {write.get('notification_count', 0)}"
+    )
+PY
+  local helper_status=$?
+  rm -f "$output"
+  return "$helper_status"
+}
+
+run_native_control_test() {
+  build_native_control_spec "$@"
+  run_native_control_app "$NATIVE_CONTROL_SPEC" test
+}
+
+run_native_status_app() {
+  local output_style="${1:-status}"
+  local output
+  output="$(mktemp -t amaran-status-test)"
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --status-test)
+  if [[ -n "$NODE_ID" ]]; then
+    args+=(--node "$NODE_ID")
+  fi
+
+  launch_app "$NATIVE_APP" "${args[@]}"
+
+  if [[ ! -s "$output" ]]; then
+    rm -f "$output"
+    echo "amaran: status did not write a result" >&2
+    return 1
+  fi
+
+  /usr/bin/python3 - "$JSON" "$output_style" "$output" <<'PY'
+import json
+import sys
+
+raw_json, output_style, output = sys.argv[1] == "1", sys.argv[2], sys.argv[3]
+with open(output, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+if not payload.get("ok"):
+    data = payload.get("data", {})
+    detail = payload.get("error")
+    if not detail and data.get("central_state"):
+        detail = f"status failed (central_state {data['central_state']})"
+    if not detail:
+        detail = "status failed"
+    print(f"amaran: {detail}", file=sys.stderr)
+    sys.exit(1)
+
+data = payload.get("data", {})
+if raw_json and output_style == "test":
+    print(json.dumps(data, indent=2))
+    sys.exit(0)
+
+cct = None
+telink_status = None
+for notification in data.get("proxy_notifications", []):
+    telink = notification.get("access", {}).get("telink", {})
+    if "cct" in telink:
+        cct = telink["cct"]
+        telink_status = telink
+        break
+
+if not cct:
+    print("amaran: status returned no CCT packet", file=sys.stderr)
+    sys.exit(1)
+
+native = data.get("native_send", {})
+telink_status = telink_status or {}
+status = {
+    "address": native.get("address"),
+    "menu": {
+        "type": {
+            "name": "CCT",
+            "value": 0,
+        },
+    },
+    "cct": {
+        "sleep_mode": cct.get("sleep_mode"),
+        "reserve": cct.get("reserve"),
+        "cct_flag": cct.get("cct_flag"),
+        "gm_flag": cct.get("gm_flag"),
+        "gm_high": cct.get("gm_high"),
+        "gm": cct.get("gm_decoded"),
+        "cct": cct.get("cct_decoded"),
+        "intensity": cct.get("intensity"),
+        "check_sum": telink_status.get("check_sum"),
+        "command_type": telink_status.get("command_type"),
+        "opera_type": telink_status.get("opera_type"),
+    },
+}
+status["cct"] = {key: value for key, value in status["cct"].items() if value is not None}
+
+if raw_json:
+    print(json.dumps(status, indent=2))
+    sys.exit(0)
+
+parts = [f"address {native.get('address')}"]
+if cct.get("intensity") is not None:
+    parts.append(f"intensity {cct['intensity'] / 10:g}%")
+if cct.get("cct_kelvin") is not None:
+    parts.append(f"cct {cct['cct_kelvin']}K")
+if "sleep_mode" in cct:
+    parts.append(f"sleep_mode {cct['sleep_mode']}")
+print(", ".join(parts))
+PY
+  local helper_status=$?
+  rm -f "$output"
+  return "$helper_status"
+}
+
+run_native_status_test() {
+  run_native_status_app test
+}
+
+run_native_configure_test() {
+  local composition_json
+  local appkey_list_json
+  local appkey_add_json
+  local model_bind_json
+  local has_appkey_zero
+
+  if [[ "$JSON" == "1" ]]; then
+    if ! composition_json="$(capture_native_json run_native_config_composition_get_test)"; then
+      return 1
+    fi
+    if ! appkey_list_json="$(capture_native_json run_native_config_appkey_get_test)"; then
+      return 1
+    fi
+    if ! has_appkey_zero="$(native_json_has_appkey_index "$appkey_list_json" 0)"; then
+      return 1
+    fi
+    if [[ "$has_appkey_zero" == "1" ]]; then
+      appkey_add_json='{"skipped":true,"reason":"app_key_index_present","app_key_index":0}'
+    else
+      if ! appkey_add_json="$(capture_native_json run_native_config_appkey_add_test)"; then
+        return 1
+      fi
+    fi
+    if ! model_bind_json="$(capture_native_json run_native_config_model_app_bind_test)"; then
+      return 1
+    fi
+    print_native_configure_json "$composition_json" "$appkey_list_json" "$appkey_add_json" "$model_bind_json"
+    return
+  fi
+
+  run_native_config_composition_get_test || return 1
+  if ! appkey_list_json="$(capture_native_json run_native_config_appkey_get_test)"; then
+    return 1
+  fi
+  print_native_appkey_list_summary "$appkey_list_json" || return 1
+  if ! has_appkey_zero="$(native_json_has_appkey_index "$appkey_list_json" 0)"; then
+    return 1
+  fi
+  if [[ "$has_appkey_zero" == "1" ]]; then
+    echo "Config AppKey Add skipped: app_key_index 0 already present"
+  else
+    run_native_config_appkey_add_test || return 1
+  fi
+  run_native_config_model_app_bind_test || return 1
+  echo "configuration complete"
+}
+
+native_configure_retry_attempts() {
+  local attempts="${AMARAN_CONFIGURE_ATTEMPTS:-3}"
+  case "$attempts" in
+    <->)
+      if (( attempts > 0 )); then
+        print -r -- "$attempts"
+        return
+      fi
+      ;;
+  esac
+  print -r -- "3"
+}
+
+native_configure_retry_delay() {
+  local delay="${AMARAN_CONFIGURE_RETRY_DELAY:-5}"
+  case "$delay" in
+    <->|<->.<->)
+      print -r -- "$delay"
+      return
+      ;;
+  esac
+  print -r -- "5"
+}
+
+run_native_configure_with_retry() {
+  local max_attempts
+  local delay
+  local attempt=1
+  local status
+  max_attempts="$(native_configure_retry_attempts)"
+  delay="$(native_configure_retry_delay)"
+
+  while true; do
+    if run_native_configure_test; then
+      return 0
+    fi
+    status=$?
+    if (( attempt >= max_attempts )); then
+      return "$status"
+    fi
+    echo "amaran: configuration attempt $attempt failed; retrying in ${delay}s..." >&2
+    sleep "$delay"
+    attempt=$(( attempt + 1 ))
+  done
+}
+
+capture_native_configure_json_with_retry() {
+  local max_attempts
+  local delay
+  local attempt=1
+  local status
+  local captured
+  local error_output
+  max_attempts="$(native_configure_retry_attempts)"
+  delay="$(native_configure_retry_delay)"
+
+  while true; do
+    error_output="$(mktemp -t amaran-configure-error)"
+    if captured="$(capture_native_json run_native_configure_test 2>"$error_output")"; then
+      rm -f "$error_output"
+      print -r -- "$captured"
+      return 0
+    fi
+    status=$?
+    if [[ -s "$error_output" ]]; then
+      cat "$error_output" >&2
+    fi
+    rm -f "$error_output"
+    if (( attempt >= max_attempts )); then
+      return "$status"
+    fi
+    echo "amaran: configuration attempt $attempt failed; retrying in ${delay}s..." >&2
+    sleep "$delay"
+    attempt=$(( attempt + 1 ))
+  done
+}
+
+run_native_config_composition_get_test() {
+  local output
+  output="$(mktemp -t amaran-config-composition-get-test)"
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --config-composition-get-test)
+  if [[ -n "$NODE_ID" ]]; then
+    args+=(--node "$NODE_ID")
+  fi
+
+  launch_app "$NATIVE_APP" "${args[@]}"
+
+  if [[ ! -s "$output" ]]; then
+    rm -f "$output"
+    echo "amaran: Config Composition Data Get test did not write a result" >&2
+    exit 1
+  fi
+
+  /usr/bin/python3 - "$JSON" "$output" <<'PY'
+import json
+import sys
+
+raw_json, output = sys.argv[1] == "1", sys.argv[2]
+with open(output, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+if not payload.get("ok"):
+    print(f"amaran: {payload.get('error', 'Config Composition Data Get test failed')}", file=sys.stderr)
+    sys.exit(1)
+
+data = payload.get("data", {})
+if raw_json:
+    print(json.dumps(data, indent=2))
+else:
+    native = data.get("native_send", {})
+    composition = data.get("composition_data") or {}
+    if not composition.get("stored"):
+        print("amaran: composition data response was not stored", file=sys.stderr)
+        sys.exit(1)
+    print(
+        "Config Composition Data stored: "
+        f"address {native.get('address')}, "
+        f"elements {composition.get('element_count')}, "
+        f"vendor_models {composition.get('vendor_model_count')}, "
+        f"sequence {native.get('sequence')}"
+    )
+PY
+  local helper_status=$?
+  rm -f "$output"
+  return "$helper_status"
+}
+
+run_native_config_appkey_get_test() {
+  local output
+  output="$(mktemp -t amaran-config-appkey-get-test)"
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --config-appkey-get-test)
+  if [[ -n "$NODE_ID" ]]; then
+    args+=(--node "$NODE_ID")
+  fi
+
+  launch_app "$NATIVE_APP" "${args[@]}"
+
+  if [[ ! -s "$output" ]]; then
+    rm -f "$output"
+    echo "amaran: Config AppKey Get test did not write a result" >&2
+    exit 1
+  fi
+
+  /usr/bin/python3 - "$JSON" "$output" <<'PY'
+import json
+import sys
+
+raw_json, output = sys.argv[1] == "1", sys.argv[2]
+with open(output, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+if not payload.get("ok"):
+    print(f"amaran: {payload.get('error', 'Config AppKey Get test failed')}", file=sys.stderr)
+    sys.exit(1)
+
+data = payload.get("data", {})
+if raw_json:
+    print(json.dumps(data, indent=2))
+else:
+    native = data.get("native_send", {})
+    appkey_list = None
+    for notification in data.get("proxy_notifications", []):
+        config = ((notification.get("access") or {}).get("config") or {})
+        if config.get("message") == "appkey_list":
+            appkey_list = config
+            break
+    if not appkey_list:
+        print("amaran: Config AppKey List response was not received", file=sys.stderr)
+        sys.exit(1)
+    indexes = appkey_list.get("app_key_indexes") or []
+    print(
+        "Config AppKey List: "
+        f"address {native.get('address')}, "
+        f"net_key_index {appkey_list.get('net_key_index')}, "
+        f"app_key_indexes {','.join(str(item) for item in indexes) if indexes else '(none)'}, "
+        f"status {appkey_list.get('status_name')}"
+    )
+PY
+  local helper_status=$?
+  rm -f "$output"
+  return "$helper_status"
+}
+
+run_native_config_appkey_add_test() {
+  local output
+  output="$(mktemp -t amaran-config-appkey-add-test)"
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --config-appkey-add-test)
+  if [[ -n "$NODE_ID" ]]; then
+    args+=(--node "$NODE_ID")
+  fi
+
+  launch_app "$NATIVE_APP" "${args[@]}"
+
+  if [[ ! -s "$output" ]]; then
+    rm -f "$output"
+    echo "amaran: Config AppKey Add test did not write a result" >&2
+    exit 1
+  fi
+
+  /usr/bin/python3 - "$JSON" "$output" <<'PY'
+import json
+import sys
+
+raw_json, output = sys.argv[1] == "1", sys.argv[2]
+with open(output, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+if not payload.get("ok"):
+    print(f"amaran: {payload.get('error', 'Config AppKey Add test failed')}", file=sys.stderr)
+    sys.exit(1)
+
+data = payload.get("data", {})
+if raw_json:
+    print(json.dumps(data, indent=2))
+else:
+    native = data.get("native_send", {})
+    ack = data.get("segment_ack", {})
+    print(
+        "Config AppKey Add sent: "
+        f"address {native.get('address')}, "
+        f"sequence {native.get('sequence')}-{native.get('sequence_last')}, "
+        f"segments {native.get('segment_count')}, "
+        f"ack {'complete' if ack.get('complete') else 'incomplete'}"
+    )
+PY
+  local helper_status=$?
+  rm -f "$output"
+  return "$helper_status"
+}
+
+run_native_config_model_app_bind_test() {
+  local output
+  output="$(mktemp -t amaran-config-model-app-bind-test)"
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --config-model-app-bind-test)
+  if [[ -n "$NODE_ID" ]]; then
+    args+=(--node "$NODE_ID")
+  fi
+
+  launch_app "$NATIVE_APP" "${args[@]}"
+
+  if [[ ! -s "$output" ]]; then
+    rm -f "$output"
+    echo "amaran: Config Model App Bind test did not write a result" >&2
+    exit 1
+  fi
+
+  /usr/bin/python3 - "$JSON" "$output" <<'PY'
+import json
+import sys
+
+raw_json, output = sys.argv[1] == "1", sys.argv[2]
+with open(output, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+if not payload.get("ok"):
+    print(f"amaran: {payload.get('error', 'Config Model App Bind test failed')}", file=sys.stderr)
+    sys.exit(1)
+
+data = payload.get("data", {})
+if raw_json:
+    print(json.dumps(data, indent=2))
+else:
+    native = data.get("native_send", {})
+    print(
+        "Config Model App Bind sent: "
+        f"address {native.get('address')}, "
+        f"element {native.get('element_address')}, "
+        f"model {native.get('model_company_id')}:{native.get('model_id')}, "
+        f"sequence {native.get('sequence')}"
+    )
+PY
+  local helper_status=$?
+  rm -f "$output"
+  return "$helper_status"
+}
+
+run_native_config_node_reset_preflight() {
+  /usr/bin/python3 - "$JSON" "$STATE_PATH" "$NODE_ID" <<'PY'
+import json
+import os
+import sys
+
+raw_json = sys.argv[1] == "1"
+state_path = os.path.abspath(os.path.expanduser(sys.argv[2]))
+node_id = sys.argv[3]
+
+def fail(message):
+    print(f"amaran: {message}", file=sys.stderr)
+    sys.exit(1)
+
+def display_path(path):
+    home = os.path.expanduser("~")
+    path = os.path.abspath(os.path.expanduser(path))
+    if path == home:
+        return "~"
+    if path.startswith(home + os.sep):
+        return "~" + path[len(home):]
+    return path
+
+def normalize_mac(value):
+    return "".join(ch for ch in str(value or "") if ch in "0123456789abcdefABCDEF").upper()
+
+def mac_suffix(value):
+    normalized = normalize_mac(value)
+    return normalized[-6:] if normalized else ""
+
+def fixture_label(fixture):
+    if fixture.get("name"):
+        return str(fixture["name"])
+    code = fixture.get("code")
+    suffix = mac_suffix(fixture.get("mac_address"))
+    if code and suffix:
+        return f"{code}-{suffix}"
+    return suffix or f"fixture-{fixture.get('node_address', 'unknown')}"
+
+def is_hex_bytes(value, byte_count):
+    if not isinstance(value, str):
+        return False
+    value = value.strip()
+    return len(value) == byte_count * 2 and all(ch in "0123456789abcdefABCDEF" for ch in value)
+
+def int_in_range(value, minimum, maximum):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    if minimum <= parsed <= maximum:
+        return parsed
+    return None
+
+def occupied_fixture_addresses(fixtures):
+    occupied = set()
+    for fixture in fixtures:
+        if not isinstance(fixture, dict):
+            continue
+        address = int_in_range(fixture.get("node_address"), 1, 0x7FFF)
+        if address is not None:
+            occupied.add(address)
+    return occupied
+
+def reset_source_address(runtime, fixtures, destination):
+    occupied = occupied_fixture_addresses(fixtures)
+    existing = runtime.get("source_address")
+    if existing is not None:
+        parsed = int_in_range(existing, 1, 0x7FFF)
+        if parsed is None:
+            fail("local state runtime data has invalid source_address")
+        if parsed != 1 and parsed != destination and parsed not in occupied:
+            return parsed
+    if 3 != destination and 3 not in occupied:
+        return 3
+    for candidate in range(4, 0x8000):
+        if candidate != destination and candidate not in occupied:
+            return candidate
+    if 2 != destination and 2 not in occupied:
+        return 2
+    fail("could not choose an unused CLI source address for node reset")
+
+if not os.path.isfile(state_path):
+    fail(f"local state not found at {state_path}")
+
+try:
+    with open(state_path, "r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+except json.JSONDecodeError as exc:
+    fail(f"local state could not be read: invalid JSON at line {exc.lineno} column {exc.colno}")
+except OSError as exc:
+    fail(f"local state could not be read: {exc}")
+
+if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+    fail("local state has unsupported schema")
+mesh = payload.get("mesh")
+fixtures = payload.get("fixtures")
+if not isinstance(mesh, dict) or not isinstance(fixtures, list) or not fixtures:
+    fail("local state is missing mesh or fixture data")
+if not is_hex_bytes(mesh.get("net_key"), 16) or not is_hex_bytes(mesh.get("app_key"), 16):
+    fail("local state mesh keys are missing or invalid")
+runtime = payload.get("runtime")
+if not isinstance(runtime, dict):
+    fail("local state is missing runtime data")
+iv_index = int_in_range(runtime.get("iv_index"), 0, 0xFFFFFFFF)
+if iv_index is None:
+    fail("local state runtime data has invalid iv_index")
+sequence_next = int_in_range(runtime.get("sequence_next"), 0, 0x00FFFFFE)
+if sequence_next is None:
+    fail("local state runtime data has invalid sequence_next")
+
+if node_id:
+    try:
+        wanted = int(node_id, 0)
+    except ValueError:
+        fail("--node must be a fixture node address for node reset")
+    matches = [fixture for fixture in fixtures if isinstance(fixture, dict) and fixture.get("node_address") == wanted]
+    if not matches:
+        fail(f"no fixture found for node {node_id}")
+    fixture = matches[0]
+else:
+    candidates = [fixture for fixture in fixtures if isinstance(fixture, dict)]
+    if len(candidates) != 1:
+        fail("multiple fixtures found; pass --node before node reset")
+    fixture = candidates[0]
+
+try:
+    address = int(fixture["node_address"])
+except (KeyError, TypeError, ValueError):
+    fail("selected fixture has invalid node address")
+if not 1 <= address <= 0x7FFF:
+    fail("selected fixture has non-unicast node address")
+if not is_hex_bytes(fixture.get("device_key"), 16):
+    fail("selected fixture device key is missing or invalid")
+source_address = reset_source_address(runtime, fixtures, address)
+
+summary = {
+    "name": fixture_label(fixture),
+    "address": address,
+    "mac_suffix": mac_suffix(fixture.get("mac_address")),
+    "code": fixture.get("code"),
+}
+data = {
+    "dry_run": True,
+    "destructive": True,
+    "ready": True,
+    "state_path": display_path(state_path),
+    "fixture": summary,
+    "runtime": {
+        "iv_index": iv_index,
+        "source_address": source_address,
+        "sequence_next": sequence_next,
+    },
+    "next_step": (
+        "run ./bin/amaran config-node-reset-test --confirm-reset, "
+        "then run pair --dry-run and pair --verify with an alternate --state-path"
+    ),
+}
+
+if raw_json:
+    print(json.dumps(data, indent=2))
+else:
+    suffix = summary.get("mac_suffix") or "unknown"
+    print("Config Node Reset dry run: ready")
+    print(f"fixture {summary['name']}\taddress {summary['address']}\t...{suffix}")
+    print(f"runtime source {source_address}, sequence_next {sequence_next}")
+    print(f"state {data['state_path']}")
+    print(f"next: {data['next_step']}")
+PY
+}
+
+run_native_config_node_reset_test() {
+  if [[ "$DRY_RUN" == "1" ]]; then
+    run_native_config_node_reset_preflight
+    return
+  fi
+
+  if [[ "$CONFIRM_RESET" != "1" ]]; then
+    echo "amaran: config-node-reset-test is destructive; pass --confirm-reset to reset the fixture" >&2
+    return 1
+  fi
+
+  local output
+  output="$(mktemp -t amaran-config-node-reset-test)"
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --config-node-reset-test --confirm-reset)
+  if [[ -n "$NODE_ID" ]]; then
+    args+=(--node "$NODE_ID")
+  fi
+
+  launch_app "$NATIVE_APP" "${args[@]}"
+
+  if [[ ! -s "$output" ]]; then
+    rm -f "$output"
+    echo "amaran: Config Node Reset test did not write a result" >&2
+    exit 1
+  fi
+
+  /usr/bin/python3 - "$JSON" "$output" <<'PY'
+import json
+import sys
+
+raw_json, output = sys.argv[1] == "1", sys.argv[2]
+with open(output, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+if not payload.get("ok"):
+    print(f"amaran: {payload.get('error', 'Config Node Reset test failed')}", file=sys.stderr)
+    sys.exit(1)
+
+data = payload.get("data", {})
+if raw_json:
+    print(json.dumps(data, indent=2))
+else:
+    native = data.get("native_send", {})
+    status_seen = False
+    for notification in data.get("proxy_notifications", []):
+        config = ((notification.get("access") or {}).get("config") or {})
+        if config.get("message") == "node_reset_status":
+            status_seen = True
+            break
+    print(
+        "Config Node Reset sent: "
+        f"address {native.get('address')}, "
+        f"sequence {native.get('sequence')}, "
+        f"status {'received' if status_seen else 'not observed'}"
+    )
+    print("next: run ./bin/amaran pair --dry-run --state-path <alternate-state-file>")
+PY
+  local helper_status=$?
+  rm -f "$output"
+  return "$helper_status"
+}
+
+run_native_status_preferred() {
+  run_native_status_app status
+}
+
+capture_native_status_json() {
+  local JSON=1
+  run_native_status_app status
+}
+
+build_native_cct_spec_from_status() {
+  local kelvin="$1"
+  local status_json
+  local error_output
+  error_output="$(mktemp -t amaran-status-error)"
+  if ! status_json="$(capture_native_status_json 2>"$error_output")"; then
+    cat "$error_output" >&2
+    rm -f "$error_output"
+    return 1
+  fi
+  rm -f "$error_output"
+
+  local spec
+  local parse_error
+  parse_error="$(mktemp -t amaran-status-parse-error)"
+  if ! spec="$(STATUS_JSON="$status_json" /usr/bin/python3 - "$kelvin" 2>"$parse_error" <<'PY'
+import json
+import os
+import sys
+
+kelvin = sys.argv[1]
+try:
+    payload = json.loads(os.environ["STATUS_JSON"])
+except (KeyError, json.JSONDecodeError):
+    print("amaran: status returned invalid JSON", file=sys.stderr)
+    sys.exit(1)
+
+cct = payload.get("cct") or {}
+intensity = cct.get("intensity")
+if intensity is None:
+    print("amaran: status did not include current intensity", file=sys.stderr)
+    sys.exit(1)
+
+gm = cct.get("gm", 10)
+gm_flag = cct.get("gm_flag", 0)
+print(f"cct:{kelvin}:{intensity / 10:g}:{int(gm)}:{int(gm_flag)}")
+PY
+  )"; then
+    cat "$parse_error" >&2
+    rm -f "$parse_error"
+    return 1
+  fi
+  rm -f "$parse_error"
+
+  NATIVE_CONTROL_SPEC="$spec"
+}
+
+run_native_control_preferred() {
+  local spec="$1"
+  local output_style="quiet"
+  if [[ "$JSON" == "1" ]]; then
+    output_style="json"
+  fi
+  run_native_control_app "$spec" "$output_style"
+}
+
+run_control_command() {
+  local action="$1"
+  shift
+
+  if [[ ! -s "$STATE_PATH" ]]; then
+    echo "amaran: control requires local state at $STATE_PATH" >&2
+    return 1
+  fi
+
+  if [[ "$action" == "cct" && -z "$INTENSITY_OPT" ]]; then
+    build_native_cct_spec_from_status "$1"
+  else
+    build_native_control_spec "$action" "$@"
+  fi
+  run_native_control_preferred "$NATIVE_CONTROL_SPEC"
+}
+
+run_status_command() {
+  if [[ ! -s "$STATE_PATH" ]]; then
+    echo "amaran: status requires local state at $STATE_PATH" >&2
+    return 1
+  fi
+
+  run_native_status_preferred
+}
+
+run_probe_command() {
+  if [[ ! -s "$STATE_PATH" ]]; then
+    echo "amaran: probe requires local state at $STATE_PATH" >&2
+    return 1
+  fi
+
+  run_native_probe_preferred
+}
+
+run_list_command() {
+  if [[ ! -s "$STATE_PATH" ]]; then
+    echo "amaran: list requires local state at $STATE_PATH" >&2
+    return 1
+  fi
+
+  run_local_state_list
+}
+
+case "$COMMAND" in
+  doctor)
+    run_direct_doctor
+    ;;
+  pair)
+    run_native_onboard_test
+    ;;
+  gatt-probe)
+    run_native_probe
+    ;;
+  provision-scan)
+    run_native_provision_scan
+    ;;
+  provision-invite-test)
+    run_native_provision_invite_test
+    ;;
+  provision-test)
+    run_native_provision_test
+    ;;
+  join-capture)
+    run_native_join_capture
+    ;;
+  pair-test)
+    run_native_onboard_test
+    ;;
+  proxy-test)
+    run_native_proxy_test
+    ;;
+  sig-onoff-test)
+    [[ ${#POSITIONALS[@]} -ge 1 ]] || { echo "amaran: sig-onoff-test requires on or off" >&2; exit 1; }
+    case "$POSITIONALS[1]" in
+      on|off)
+        run_native_sig_onoff_test "$POSITIONALS[1]"
+        ;;
+      *)
+        echo "amaran: sig-onoff-test requires on or off" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  control-test)
+    [[ ${#POSITIONALS[@]} -ge 1 ]] || { echo "amaran: control-test requires on, off, intensity, or cct" >&2; exit 1; }
+    run_native_control_test "${POSITIONALS[@]}"
+    ;;
+  status-test)
+    run_native_status_test
+    ;;
+  configure-test)
+    run_native_configure_test
+    ;;
+  config-composition-get-test)
+    run_native_config_composition_get_test
+    ;;
+  config-appkey-get-test)
+    run_native_config_appkey_get_test
+    ;;
+  config-appkey-add-test)
+    run_native_config_appkey_add_test
+    ;;
+  config-model-app-bind-test)
+    run_native_config_model_app_bind_test
+    ;;
+  config-node-reset-test)
+    run_native_config_node_reset_test
+    ;;
+  state-install)
+    run_state_install
+    ;;
+  state-join)
+    run_state_join
+    ;;
+  list)
+    run_list_command
+    ;;
+  probe)
+    run_probe_command
+    ;;
+  status)
+    run_status_command
+    ;;
+  on|off)
+    run_control_command "$COMMAND"
+    [[ "$JSON" == "1" ]] || echo "$COMMAND"
+    ;;
+  intensity)
+    [[ ${#POSITIONALS[@]} -ge 1 ]] || { echo "amaran: intensity requires a value from 0 to 100" >&2; exit 1; }
+    run_control_command intensity "$POSITIONALS[1]"
+    [[ "$JSON" == "1" ]] || echo "intensity $POSITIONALS[1]%"
+    ;;
+  cct)
+    [[ ${#POSITIONALS[@]} -ge 1 ]] || { echo "amaran: cct requires a kelvin value" >&2; exit 1; }
+    if [[ -n "$INTENSITY_OPT" ]]; then
+      run_control_command cct "$POSITIONALS[1]" --intensity "$INTENSITY_OPT"
+    else
+      run_control_command cct "$POSITIONALS[1]"
+    fi
+    [[ "$JSON" == "1" ]] || echo "cct $POSITIONALS[1]K"
+    ;;
+  *)
+    echo "amaran: unknown direct command: $COMMAND" >&2
+    exit 1
+    ;;
+esac

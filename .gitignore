@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.DS_Store
+state.json
+*.state.json
+BluetoothProbe.app/Contents/MacOS/BluetoothProbe
+BluetoothProbe.app/Contents/_CodeSignature/

@@ -1,0 +1,15 @@
+{
+  "name": "amaran-cli",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "amaran": "bin/amaran"
+  },
+  "scripts": {
+    "amaran": "./bin/amaran",
+    "build:bluetooth-helper": "scripts/build-bluetooth-probe",
+    "test": "npm run test:cli-wrapper && npm run test:mesh",
+    "test:cli-wrapper": "scripts/test-cli-wrapper",
+    "test:mesh": "swiftc native_mesh_crypto.swift native_mesh_config.swift native_mesh_provisioning.swift native_mesh_state.swift native_telink_control.swift tests/native_mesh_crypto_tests.swift -o /tmp/amaran-mesh-tests && /tmp/amaran-mesh-tests"
+  }
+}

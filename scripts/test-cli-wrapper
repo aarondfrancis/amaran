@@ -1,0 +1,379 @@
+#!/bin/sh
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/amaran-cli-wrapper-test.XXXXXX")"
+
+cleanup() {
+  rm -rf "$TMPDIR"
+}
+trap cleanup EXIT INT TERM
+
+fail() {
+  echo "test-cli-wrapper: $*" >&2
+  exit 1
+}
+
+assert_contains() {
+  haystack="$1"
+  needle="$2"
+  label="$3"
+  case "$haystack" in
+    *"$needle"*)
+      ;;
+    *)
+      fail "$label: expected output to contain '$needle'"
+      ;;
+  esac
+}
+
+assert_not_contains() {
+  haystack="$1"
+  needle="$2"
+  label="$3"
+  case "$haystack" in
+    *"$needle"*)
+      fail "$label: output leaked '$needle'"
+      ;;
+    *)
+      ;;
+  esac
+}
+
+HELP_OUTPUT="$("$ROOT/bin/amaran" --help)"
+HELP_ALIAS_OUTPUT="$("$ROOT/bin/amaran" help)"
+assert_contains "$HELP_OUTPUT" "amaran pair [--add] [--attention <0-255>] [--dry-run] [--verify] [--json]" "help pair usage"
+assert_contains "$HELP_OUTPUT" "amaran pair-test [--add] [--attention <0-255>] [--dry-run] [--verify] [--json]" "help pair-test usage"
+assert_contains "$HELP_OUTPUT" "amaran state-join <join-state.json> [--json]" "help state-join usage"
+assert_contains "$HELP_OUTPUT" "config-node-reset-test [--dry-run|--confirm-reset]" "help node reset usage"
+assert_contains "$HELP_OUTPUT" "--state-path <p>" "help state path option"
+assert_contains "$HELP_OUTPUT" "Runtime commands require local state" "help local-state safety note"
+assert_contains "$HELP_OUTPUT" "pair --add" "help pair add flow"
+assert_contains "$HELP_OUTPUT" "--dry-run" "help dry run option"
+assert_contains "$HELP_OUTPUT" "--verify" "help verify option"
+assert_contains "$HELP_OUTPUT" "--add" "help add option"
+assert_contains "$HELP_OUTPUT" "--confirm-reset" "help confirm reset option"
+test "$HELP_OUTPUT" = "$HELP_ALIAS_OUTPUT" || fail "amaran help should match --help output"
+
+INVALID_BACKEND_OUTPUT="$TMPDIR/invalid-backend.out"
+if "$ROOT/bin/amaran" status --backend native >"$INVALID_BACKEND_OUTPUT" 2>&1; then
+  fail "status --backend should fail"
+fi
+assert_contains "$(cat "$INVALID_BACKEND_OUTPUT")" "unknown option --backend" "removed backend guard"
+
+REMOVED_SYNC_OUTPUT="$TMPDIR/removed-sync.out"
+if "$ROOT/bin/amaran" sync >"$REMOVED_SYNC_OUTPUT" 2>&1; then
+  fail "sync should not be a supported command"
+fi
+assert_contains "$(cat "$REMOVED_SYNC_OUTPUT")" "unknown direct command: sync" "removed sync guard"
+
+INVALID_OUTPUT="$TMPDIR/invalid-dry-run.out"
+if "$ROOT/bin/amaran" status --dry-run >"$INVALID_OUTPUT" 2>&1; then
+  fail "status --dry-run should fail"
+fi
+assert_contains "$(cat "$INVALID_OUTPUT")" "--dry-run is only supported for pair" "invalid dry-run guard"
+
+INVALID_VERIFY_OUTPUT="$TMPDIR/invalid-verify.out"
+if "$ROOT/bin/amaran" status --verify >"$INVALID_VERIFY_OUTPUT" 2>&1; then
+  fail "status --verify should fail"
+fi
+assert_contains "$(cat "$INVALID_VERIFY_OUTPUT")" "--verify is only supported for pair" "invalid verify guard"
+
+INVALID_ADD_OUTPUT="$TMPDIR/invalid-add.out"
+if "$ROOT/bin/amaran" status --add >"$INVALID_ADD_OUTPUT" 2>&1; then
+  fail "status --add should fail"
+fi
+assert_contains "$(cat "$INVALID_ADD_OUTPUT")" "--add is only supported for pair" "invalid add guard"
+
+DRY_RUN_VERIFY_OUTPUT="$TMPDIR/dry-run-verify.out"
+if "$ROOT/bin/amaran" pair --dry-run --verify >"$DRY_RUN_VERIFY_OUTPUT" 2>&1; then
+  fail "pair --dry-run --verify should fail"
+fi
+assert_contains "$(cat "$DRY_RUN_VERIFY_OUTPUT")" "--verify cannot be used with --dry-run" "dry-run verify guard"
+
+INVALID_CONFIRM_RESET_OUTPUT="$TMPDIR/invalid-confirm-reset.out"
+if "$ROOT/bin/amaran" status --confirm-reset >"$INVALID_CONFIRM_RESET_OUTPUT" 2>&1; then
+  fail "status --confirm-reset should fail"
+fi
+assert_contains "$(cat "$INVALID_CONFIRM_RESET_OUTPUT")" "--confirm-reset is only supported" "invalid confirm-reset guard"
+
+NODE_RESET_CONFIRM_OUTPUT="$TMPDIR/node-reset-confirm.out"
+if "$ROOT/bin/amaran" config-node-reset-test --state-path "$TMPDIR/missing-state.json" >"$NODE_RESET_CONFIRM_OUTPUT" 2>&1; then
+  fail "config-node-reset-test without confirmation should fail before launching"
+fi
+assert_contains "$(cat "$NODE_RESET_CONFIRM_OUTPUT")" "pass --confirm-reset" "node reset confirmation guard"
+
+NODE_RESET_DRY_RUN_CONFIRM_OUTPUT="$TMPDIR/node-reset-dry-run-confirm.out"
+if "$ROOT/bin/amaran" config-node-reset-test --dry-run --confirm-reset >"$NODE_RESET_DRY_RUN_CONFIRM_OUTPUT" 2>&1; then
+  fail "config-node-reset-test --dry-run --confirm-reset should fail"
+fi
+assert_contains "$(cat "$NODE_RESET_DRY_RUN_CONFIRM_OUTPUT")" "--dry-run cannot be used with --confirm-reset" "node reset dry-run confirm guard"
+
+HELPER_RESET_OUTPUT="$TMPDIR/helper-node-reset.json"
+"$ROOT/BluetoothProbe.app/Contents/MacOS/BluetoothProbe" --output "$HELPER_RESET_OUTPUT" --config-node-reset-test
+assert_contains "$(cat "$HELPER_RESET_OUTPUT")" '"ok" : false' "helper node reset confirmation guard"
+assert_contains "$(cat "$HELPER_RESET_OUTPUT")" "--confirm-reset" "helper node reset confirmation guard"
+
+EXISTING_STATE="$TMPDIR/existing-state.json"
+printf '{"not":"real-state"}\n' > "$EXISTING_STATE"
+PREFLIGHT_OUTPUT="$("$ROOT/bin/amaran" pair --dry-run --state-path "$EXISTING_STATE")"
+assert_contains "$PREFLIGHT_OUTPUT" "pair preflight: existing studio state" "pair existing-state preflight"
+assert_contains "$PREFLIGHT_OUTPUT" "pair --add" "pair existing-state next step"
+
+PREFLIGHT_JSON="$("$ROOT/bin/amaran" pair --dry-run --json --state-path "$EXISTING_STATE")"
+assert_contains "$PREFLIGHT_JSON" '"state_path_available": false' "pair existing-state json"
+assert_contains "$PREFLIGHT_JSON" '"state_path_writable": false' "pair existing-state json writable"
+assert_contains "$PREFLIGHT_JSON" '"blocked_by_existing_state": true' "pair existing-state json guard"
+
+PREFLIGHT_ADD_INVALID_OUTPUT="$("$ROOT/bin/amaran" pair --add --dry-run --state-path "$EXISTING_STATE")"
+assert_contains "$PREFLIGHT_ADD_INVALID_OUTPUT" "pair add preflight: state is not usable" "pair add invalid-state preflight"
+assert_contains "$PREFLIGHT_ADD_INVALID_OUTPUT" "unsupported state schema version" "pair add invalid-state detail"
+
+PREFLIGHT_ADD_MISSING_OUTPUT="$("$ROOT/bin/amaran" pair --add --dry-run --state-path "$TMPDIR/missing-add-state.json")"
+assert_contains "$PREFLIGHT_ADD_MISSING_OUTPUT" "pair add preflight: missing existing state" "pair add missing-state preflight"
+assert_contains "$PREFLIGHT_ADD_MISSING_OUTPUT" "pair first" "pair add missing-state next step"
+
+UNWRITABLE_DIR="$TMPDIR/unwritable"
+mkdir "$UNWRITABLE_DIR"
+chmod 500 "$UNWRITABLE_DIR"
+UNWRITABLE_OUTPUT="$("$ROOT/bin/amaran" pair --dry-run --state-path "$UNWRITABLE_DIR/state.json")"
+assert_contains "$UNWRITABLE_OUTPUT" "state path is not writable" "pair unwritable preflight"
+assert_contains "$UNWRITABLE_OUTPUT" "choose a writable --state-path" "pair unwritable next step"
+UNWRITABLE_JSON="$("$ROOT/bin/amaran" pair --dry-run --json --state-path "$UNWRITABLE_DIR/state.json")"
+assert_contains "$UNWRITABLE_JSON" '"state_path_available": false' "pair unwritable json available"
+assert_contains "$UNWRITABLE_JSON" '"state_path_writable": false' "pair unwritable json writable"
+
+PROVISION_EXISTING_OUTPUT="$TMPDIR/provision-existing.out"
+if "$ROOT/bin/amaran" provision-test --state-path "$EXISTING_STATE" >"$PROVISION_EXISTING_OUTPUT" 2>&1; then
+  fail "provision-test should fail when state exists"
+fi
+assert_contains "$(cat "$PROVISION_EXISTING_OUTPUT")" "before provisioning" "provision existing-state guard"
+
+PROVISION_UNWRITABLE_OUTPUT="$TMPDIR/provision-unwritable.out"
+if "$ROOT/bin/amaran" provision-test --state-path "$UNWRITABLE_DIR/state.json" >"$PROVISION_UNWRITABLE_OUTPUT" 2>&1; then
+  fail "provision-test should fail when state path is not writable"
+fi
+assert_contains "$(cat "$PROVISION_UNWRITABLE_OUTPUT")" "choose a writable --state-path before provisioning" "provision unwritable guard"
+chmod 700 "$UNWRITABLE_DIR"
+
+STATE_WITH_SECRETS="$TMPDIR/state-with-secrets.json"
+NET_KEY_SENTINEL="00112233445566778899AABBCCDDEEFF"
+APP_KEY_SENTINEL="112233445566778899AABBCCDDEEFF00"
+DEVICE_KEY_SENTINEL="2233445566778899AABBCCDDEEFF0011"
+DEVICE_UUID_SENTINEL="33445566778899AABBCCDDEEFF001122"
+cat > "$STATE_WITH_SECRETS" <<JSON
+{
+  "schema_version": 1,
+  "synced_at": "2026-05-19T00:00:00Z",
+  "source": {
+    "type": "native_provisioning"
+  },
+  "mesh": {
+    "uuid": "test-mesh",
+    "net_key": "$NET_KEY_SENTINEL",
+    "app_key": "$APP_KEY_SENTINEL"
+  },
+  "fixtures": [
+    {
+      "uuid": "test-fixture",
+      "mac_address": "A4:C1:38:12:3C:21",
+      "code": "400M5",
+      "name": "redaction-test",
+      "node_address": 2,
+      "device_key": "$DEVICE_KEY_SENTINEL",
+      "device_uuid": "$DEVICE_UUID_SENTINEL",
+      "composition_data": "010203"
+    }
+  ],
+  "runtime": {
+    "iv_index": 0,
+    "source_address": 3,
+    "telink_source_address": 1,
+    "sequence_next": 1,
+    "last_reserved_by": "test"
+  }
+}
+JSON
+
+NODE_RESET_DRY_RUN_OUTPUT="$("$ROOT/bin/amaran" config-node-reset-test --dry-run --state-path "$STATE_WITH_SECRETS")"
+assert_contains "$NODE_RESET_DRY_RUN_OUTPUT" "Config Node Reset dry run: ready" "node reset dry-run summary"
+assert_contains "$NODE_RESET_DRY_RUN_OUTPUT" "redaction-test" "node reset dry-run fixture"
+assert_contains "$NODE_RESET_DRY_RUN_OUTPUT" "runtime source 3, sequence_next 1" "node reset dry-run runtime"
+NODE_RESET_DRY_RUN_JSON="$("$ROOT/bin/amaran" config-node-reset-test --dry-run --json --state-path "$STATE_WITH_SECRETS")"
+assert_contains "$NODE_RESET_DRY_RUN_JSON" '"dry_run": true' "node reset dry-run json"
+assert_contains "$NODE_RESET_DRY_RUN_JSON" '"destructive": true' "node reset dry-run json"
+assert_contains "$NODE_RESET_DRY_RUN_JSON" '"source_address": 3' "node reset dry-run runtime json"
+
+MISSING_RESET_RUNTIME_STATE="$TMPDIR/missing-reset-runtime-state.json"
+python3 - "$STATE_WITH_SECRETS" "$MISSING_RESET_RUNTIME_STATE" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1], sys.argv[2]
+with open(source, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+payload.pop("runtime", None)
+with open(target, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh)
+    fh.write("\n")
+PY
+MISSING_RESET_RUNTIME_OUTPUT="$TMPDIR/node-reset-missing-runtime.out"
+if "$ROOT/bin/amaran" config-node-reset-test --dry-run --state-path "$MISSING_RESET_RUNTIME_STATE" >"$MISSING_RESET_RUNTIME_OUTPUT" 2>&1; then
+  fail "config-node-reset-test --dry-run should reject missing runtime data"
+fi
+assert_contains "$(cat "$MISSING_RESET_RUNTIME_OUTPUT")" "missing runtime data" "node reset dry-run missing runtime guard"
+
+INVALID_RESET_SEQUENCE_STATE="$TMPDIR/invalid-reset-sequence-state.json"
+sed 's/"sequence_next": 1/"sequence_next": 16777215/' "$STATE_WITH_SECRETS" > "$INVALID_RESET_SEQUENCE_STATE"
+INVALID_RESET_SEQUENCE_OUTPUT="$TMPDIR/node-reset-invalid-sequence.out"
+if "$ROOT/bin/amaran" config-node-reset-test --dry-run --state-path "$INVALID_RESET_SEQUENCE_STATE" >"$INVALID_RESET_SEQUENCE_OUTPUT" 2>&1; then
+  fail "config-node-reset-test --dry-run should reject invalid runtime sequence_next"
+fi
+assert_contains "$(cat "$INVALID_RESET_SEQUENCE_OUTPUT")" "invalid sequence_next" "node reset dry-run invalid sequence guard"
+
+INSTALLED_STATE="$TMPDIR/installed-state.json"
+INSTALL_OUTPUT="$("$ROOT/bin/amaran" state-install "$STATE_WITH_SECRETS" --state-path "$INSTALLED_STATE")"
+assert_contains "$INSTALL_OUTPUT" "installed 1 fixture" "state-install summary"
+assert_contains "$INSTALL_OUTPUT" "redaction-test" "state-install fixture summary"
+test -s "$INSTALLED_STATE" || fail "state-install should write target state"
+INSTALLED_MODE="$(stat -f "%Lp" "$INSTALLED_STATE")"
+case "$INSTALLED_MODE" in
+  600)
+    ;;
+  *)
+    fail "state-install should write 0600 permissions, got $INSTALLED_MODE"
+    ;;
+esac
+INSTALL_EXISTING_OUTPUT="$TMPDIR/state-install-existing.out"
+if "$ROOT/bin/amaran" state-install "$STATE_WITH_SECRETS" --state-path "$INSTALLED_STATE" >"$INSTALL_EXISTING_OUTPUT" 2>&1; then
+  fail "state-install should refuse to overwrite target state"
+fi
+assert_contains "$(cat "$INSTALL_EXISTING_OUTPUT")" "target state file already exists" "state-install overwrite guard"
+
+JOIN_SOURCE="$TMPDIR/join-source.json"
+cat > "$JOIN_SOURCE" <<JSON
+{
+  "mesh": {
+    "uuid": "joined-test-mesh",
+    "net_key": "$NET_KEY_SENTINEL",
+    "app_key": "$APP_KEY_SENTINEL",
+    "iv_index": 0
+  },
+  "fixtures": [
+    {
+      "name": "joined-control",
+      "node_address": 4,
+      "mac_address": "A4:C1:38:99:88:77",
+      "code": "400M5",
+      "element_count": 1
+    }
+  ],
+  "runtime": {
+    "sequence_next": 7
+  }
+}
+JSON
+JOINED_STATE="$TMPDIR/joined-state.json"
+JOIN_OUTPUT="$("$ROOT/bin/amaran" state-join "$JOIN_SOURCE" --state-path "$JOINED_STATE")"
+assert_contains "$JOIN_OUTPUT" "joined mesh with 1 fixture" "state-join summary"
+assert_contains "$JOIN_OUTPUT" "joined-control" "state-join fixture"
+assert_contains "$JOIN_OUTPUT" "control-only" "state-join control-only fixture"
+assert_contains "$JOIN_OUTPUT" "DeviceKeys are missing" "state-join control-only warning"
+test -s "$JOINED_STATE" || fail "state-join should write target state"
+JOINED_MODE="$(stat -f "%Lp" "$JOINED_STATE")"
+case "$JOINED_MODE" in
+  600)
+    ;;
+  *)
+    fail "state-join should write 0600 permissions, got $JOINED_MODE"
+    ;;
+esac
+JOIN_DOCTOR_OUTPUT="$("$ROOT/bin/amaran" doctor --state-path "$JOINED_STATE")"
+assert_contains "$JOIN_DOCTOR_OUTPUT" "runtime ready" "state-join runtime readiness"
+assert_contains "$JOIN_DOCTOR_OUTPUT" "DeviceKey metadata missing" "state-join doctor warning"
+JOIN_RESET_OUTPUT="$TMPDIR/join-reset.out"
+if "$ROOT/bin/amaran" config-node-reset-test --dry-run --state-path "$JOINED_STATE" >"$JOIN_RESET_OUTPUT" 2>&1; then
+  fail "control-only joined state should not allow DeviceKey reset"
+fi
+assert_contains "$(cat "$JOIN_RESET_OUTPUT")" "device key is missing or invalid" "state-join config guard"
+
+INVALID_JSON_STATE="$TMPDIR/invalid-json-state.json"
+printf '{not json}\n' > "$INVALID_JSON_STATE"
+INVALID_JSON_OUTPUT="$TMPDIR/state-install-invalid-json.out"
+if "$ROOT/bin/amaran" state-install "$INVALID_JSON_STATE" --state-path "$TMPDIR/invalid-json-target.json" >"$INVALID_JSON_OUTPUT" 2>&1; then
+  fail "state-install should reject invalid JSON"
+fi
+assert_contains "$(cat "$INVALID_JSON_OUTPUT")" "source state file could not be read: invalid JSON" "state-install invalid JSON guard"
+assert_not_contains "$(cat "$INVALID_JSON_OUTPUT")" "Traceback" "state-install invalid JSON traceback"
+
+TARGET_PARENT_FILE="$TMPDIR/state-target-parent-file"
+printf 'not a directory\n' > "$TARGET_PARENT_FILE"
+TARGET_WRITE_OUTPUT="$TMPDIR/state-install-target-write.out"
+if "$ROOT/bin/amaran" state-install "$STATE_WITH_SECRETS" --state-path "$TARGET_PARENT_FILE/state.json" >"$TARGET_WRITE_OUTPUT" 2>&1; then
+  fail "state-install should reject unwritable target paths"
+fi
+assert_contains "$(cat "$TARGET_WRITE_OUTPUT")" "target state file could not be written" "state-install target write guard"
+assert_not_contains "$(cat "$TARGET_WRITE_OUTPUT")" "Traceback" "state-install target write traceback"
+
+INVALID_NET_KEY_STATE="$TMPDIR/invalid-net-key-state.json"
+sed "s/$NET_KEY_SENTINEL/not-a-valid-key/" "$STATE_WITH_SECRETS" > "$INVALID_NET_KEY_STATE"
+INVALID_NET_KEY_OUTPUT="$TMPDIR/state-install-invalid-net-key.out"
+if "$ROOT/bin/amaran" state-install "$INVALID_NET_KEY_STATE" --state-path "$TMPDIR/invalid-net-key-target.json" >"$INVALID_NET_KEY_OUTPUT" 2>&1; then
+  fail "state-install should reject invalid mesh net_key"
+fi
+assert_contains "$(cat "$INVALID_NET_KEY_OUTPUT")" "invalid net_key" "state-install invalid net_key guard"
+
+INVALID_DEVICE_KEY_STATE="$TMPDIR/invalid-device-key-state.json"
+sed "s/$DEVICE_KEY_SENTINEL/not-a-valid-key/" "$STATE_WITH_SECRETS" > "$INVALID_DEVICE_KEY_STATE"
+INVALID_DEVICE_KEY_OUTPUT="$TMPDIR/state-install-invalid-device-key.out"
+if "$ROOT/bin/amaran" state-install "$INVALID_DEVICE_KEY_STATE" --state-path "$TMPDIR/invalid-device-key-target.json" >"$INVALID_DEVICE_KEY_OUTPUT" 2>&1; then
+  fail "state-install should reject invalid fixture device_key"
+fi
+assert_contains "$(cat "$INVALID_DEVICE_KEY_OUTPUT")" "invalid device_key" "state-install invalid device_key guard"
+
+MISSING_RUNTIME_STATE="$TMPDIR/missing-runtime-state.json"
+python3 - "$STATE_WITH_SECRETS" "$MISSING_RUNTIME_STATE" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1], sys.argv[2]
+with open(source, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+payload.pop("runtime", None)
+with open(target, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh)
+    fh.write("\n")
+PY
+MISSING_RUNTIME_OUTPUT="$TMPDIR/state-install-missing-runtime.out"
+if "$ROOT/bin/amaran" state-install "$MISSING_RUNTIME_STATE" --state-path "$TMPDIR/missing-runtime-target.json" >"$MISSING_RUNTIME_OUTPUT" 2>&1; then
+  fail "state-install should reject missing runtime data"
+fi
+assert_contains "$(cat "$MISSING_RUNTIME_OUTPUT")" "missing runtime data" "state-install missing runtime guard"
+
+INVALID_SEQUENCE_STATE="$TMPDIR/invalid-sequence-state.json"
+sed 's/"sequence_next": 1/"sequence_next": 16777215/' "$STATE_WITH_SECRETS" > "$INVALID_SEQUENCE_STATE"
+INVALID_SEQUENCE_OUTPUT="$TMPDIR/state-install-invalid-sequence.out"
+if "$ROOT/bin/amaran" state-install "$INVALID_SEQUENCE_STATE" --state-path "$TMPDIR/invalid-sequence-target.json" >"$INVALID_SEQUENCE_OUTPUT" 2>&1; then
+  fail "state-install should reject invalid runtime sequence_next"
+fi
+assert_contains "$(cat "$INVALID_SEQUENCE_OUTPUT")" "invalid sequence_next" "state-install invalid sequence guard"
+
+for output in \
+  "$("$ROOT/bin/amaran" doctor --state-path "$STATE_WITH_SECRETS")" \
+  "$("$ROOT/bin/amaran" doctor --json --state-path "$STATE_WITH_SECRETS")" \
+  "$("$ROOT/bin/amaran" list --state-path "$STATE_WITH_SECRETS")" \
+  "$("$ROOT/bin/amaran" pair --dry-run --json --state-path "$STATE_WITH_SECRETS")" \
+  "$JOIN_OUTPUT" \
+  "$JOIN_DOCTOR_OUTPUT" \
+  "$("$ROOT/bin/amaran" list --state-path "$JOINED_STATE")" \
+  "$NODE_RESET_DRY_RUN_OUTPUT" \
+  "$NODE_RESET_DRY_RUN_JSON" \
+  "$INSTALL_OUTPUT"
+do
+  assert_not_contains "$output" "$NET_KEY_SENTINEL" "redaction net key"
+  assert_not_contains "$output" "$APP_KEY_SENTINEL" "redaction app key"
+  assert_not_contains "$output" "$DEVICE_KEY_SENTINEL" "redaction device key"
+  assert_not_contains "$output" "$DEVICE_UUID_SENTINEL" "redaction device UUID"
+done
+
+echo "test-cli-wrapper: ok"

@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+APP="$ROOT/BluetoothProbe.app"
+OUTPUT="$APP/Contents/MacOS/BluetoothProbe"
+IDENTITY="${AMARAN_CODESIGN_IDENTITY:--}"
+LOCAL_REQUIREMENT='=designated => identifier "dev.local.bluetooth-probe"'
+
+mkdir -p "$APP/Contents/MacOS"
+
+swiftc \
+  "$ROOT/bluetooth_probe.swift" \
+  "$ROOT/native_mesh_crypto.swift" \
+  "$ROOT/native_mesh_config.swift" \
+  "$ROOT/native_mesh_provisioning.swift" \
+  "$ROOT/native_mesh_state.swift" \
+  "$ROOT/native_telink_control.swift" \
+  -o "$OUTPUT"
+
+if [ "$IDENTITY" = "-" ]; then
+  codesign --force --deep --sign - --requirements "$LOCAL_REQUIREMENT" "$APP"
+else
+  codesign --force --deep --sign "$IDENTITY" "$APP"
+fi
+
+codesign --verify --deep --strict "$APP"
