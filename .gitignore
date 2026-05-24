@@ -5,3 +5,5 @@ state.json
 *.state.json
 BluetoothProbe.app/Contents/MacOS/BluetoothProbe
 BluetoothProbe.app/Contents/_CodeSignature/
+.zephyrproject/
+.zephyr-build/

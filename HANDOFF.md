@@ -46,6 +46,20 @@ something beyond local name + provisioning service UUID. The missing piece is
 likely raw provisioning service data, manufacturer data, or a fixture-specific
 advertising identity that macOS CoreBluetooth cannot fully spoof.
 
+After the nRF52840 DK arrived, the DK path was validated:
+
+- macOS sees the board as SEGGER J-Link serial `1050234299`, board
+  `PCA10056`.
+- `nrfutil device list` reports traits `devkit`, `jlink`, `seggerUsb`,
+  `serialPorts`, and `usb`.
+- A local Zephyr workspace under ignored `.zephyrproject/` can build and flash
+  firmware with `west`.
+- `firmware/sidus-join-probe` builds and flashes to the DK.
+- `./bin/amaran provision-scan --json --timeout 10` sees the DK as
+  `amaran 60x S` with real Mesh Provisioning service data.
+- `./bin/amaran provision-invite-test --json --attention 0 --timeout 20`
+  confirms no-OOB capabilities.
+
 ## Why The nRF52840 DK
 
 The nRF52840 DK gives us raw BLE advertising and Bluetooth Mesh control that
@@ -114,6 +128,9 @@ Initial milestone:
 
 - DK appears in nRF Connect with real provisioning service data.
 - DK appears in Sidus Link Pro add-fixture flow.
+
+The first half is complete. The next live test is whether Sidus Link Pro shows
+the flashed DK in its add-fixture flow.
 
 Second milestone:
 
