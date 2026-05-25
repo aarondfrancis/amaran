@@ -124,9 +124,11 @@ can scan candidate unicast addresses and optionally keep responsive fixtures:
 
 `discover` uses the existing NetKey/AppKey and status command to find addresses
 that answer on the current mesh. It can add runtime control entries, but it
-cannot recover new DeviceKeys or Sidus-only metadata. Take a fresh encrypted
-iPad backup and rerun `sidus-import --replace` when you need updated names,
-MACs, DeviceKeys, app metadata, or if Sidus creates a new mesh/AppKey.
+cannot recover new DeviceKeys or Sidus-only metadata. If the scan range includes
+the CLI-owned Config source address, discovery moves that source address before
+probing so an iPad-assigned fixture at that address is not skipped. Take a fresh
+encrypted iPad backup and rerun `sidus-import --replace` when you need updated
+names, MACs, DeviceKeys, app metadata, or if Sidus creates a new mesh/AppKey.
 
 Scenes live in the same local state file:
 

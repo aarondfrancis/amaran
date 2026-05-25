@@ -111,7 +111,9 @@ runtime-control layer by trying candidate unicast addresses:
 status query, and records addresses that answer. Without `--update-state`, it
 removes temporary fixture rows after probing; sequence counters may still
 advance. With `--update-state`, responsive addresses remain as control-only
-fixtures if they were not already in state.
+fixtures if they were not already in state. If the scan range includes the
+CLI-owned Config source address, discovery moves that source address before
+probing so an iPad-assigned fixture at that address is not skipped.
 
 This does not recover DeviceKeys, fixture MACs, Sidus names, groups, or Sidus
 scene metadata. For that, take a fresh encrypted iPad backup and run

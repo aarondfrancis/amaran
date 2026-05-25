@@ -136,7 +136,9 @@ Implementation notes:
   temporary candidate fixtures after probing; with `--update-state`, responsive
   new addresses may remain as control-only fixtures. It cannot recover new
   DeviceKeys, names, MACs, groups, or Sidus scenes; use a fresh Sidus backup
-  import for that metadata.
+  import for that metadata. If the scan range includes the CLI-owned Config
+  source address, discovery should relocate that source address before probing
+  so a later iPad-assigned fixture at that address is not skipped.
 - `./bin/amaran scene capture <name>` reads live vendor status from fixtures and
   stores a local named scene in the top-level `scenes` object. With
   `--node <id>`, it captures only that fixture. `scene apply` restores saved

@@ -86,6 +86,62 @@ def write_state(path, payload):
         raise
 
 
+def int_in_range(value, minimum, maximum):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    if minimum <= parsed <= maximum:
+        return parsed
+    return None
+
+
+def occupied_addresses(payload):
+    occupied = set()
+    for fixture in payload.get("fixtures", []):
+        if not isinstance(fixture, dict):
+            continue
+        address = int_in_range(fixture.get("node_address"), 1, 0x7FFF)
+        if address is None:
+            continue
+        element_count = int_in_range(fixture.get("element_count", 1), 1, 255) or 1
+        for offset in range(element_count):
+            element_address = address + offset
+            if 1 <= element_address <= 0x7FFF:
+                occupied.add(element_address)
+    return occupied
+
+
+def choose_source_address(payload, avoid):
+    runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
+    occupied = occupied_addresses(payload)
+    telink_source = int_in_range(runtime.get("telink_source_address"), 1, 0x7FFF)
+    blocked = set(occupied) | set(avoid)
+    if telink_source is not None:
+        blocked.add(telink_source)
+    for candidate in range(3, 0x8000):
+        if candidate not in blocked:
+            return candidate
+    for candidate in range(2, 0x8000):
+        if candidate not in blocked:
+            return candidate
+    fail("discover could not choose a safe CLI source address")
+
+
+def relocate_runtime_source_if_needed(payload, scan_addresses):
+    runtime = payload.get("runtime")
+    if not isinstance(runtime, dict):
+        return None
+    source = int_in_range(runtime.get("source_address"), 1, 0x7FFF)
+    if source is None or source not in set(scan_addresses):
+        return None
+    replacement = choose_source_address(payload, set(scan_addresses))
+    runtime["source_address"] = replacement
+    runtime["updated_at"] = now_iso()
+    runtime["last_reserved_by"] = "discover-source-relocation"
+    return {"from": source, "to": replacement}
+
+
 def mac_suffix(value):
     return "".join(ch for ch in str(value or "") if ch in "0123456789abcdefABCDEF").upper()[-6:]
 
@@ -173,8 +229,11 @@ def main():
     state_path = Path(args.state_path).expanduser().resolve()
     addresses = parse_range(args.range)
     payload = load_state(state_path)
+    source_relocation = relocate_runtime_source_if_needed(payload, addresses)
+    if source_relocation:
+        write_state(state_path, payload)
     runtime = payload.get("runtime") or {}
-    reserved = {runtime.get("source_address"), runtime.get("telink_source_address")}
+    reserved = {runtime.get("telink_source_address")}
 
     found = []
     misses = []
@@ -215,6 +274,8 @@ def main():
         "fixtures": found,
         "misses": misses,
     }
+    if source_relocation:
+        output["runtime_source_relocated"] = source_relocation
     if args.json:
         print(json.dumps(output, indent=2))
         return
@@ -228,6 +289,8 @@ def main():
         if fixture.get("cct") is not None:
             parts.append(f"{fixture['cct']}K")
         print("\t".join(parts))
+    if source_relocation:
+        print(f"runtime source moved {source_relocation['from']}->{source_relocation['to']} to avoid scanned fixture addresses")
     if not args.update_state:
         print("state fixtures unchanged; sequence counters may be advanced")
 

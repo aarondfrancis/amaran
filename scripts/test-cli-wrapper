@@ -344,6 +344,52 @@ fi
 assert_contains "$(cat "$DISCOVER_INVALID_OUTPUT")" "invalid --range" "discover invalid range guard"
 assert_not_contains "$(cat "$DISCOVER_INVALID_OUTPUT")" "Traceback" "discover invalid range traceback"
 
+DISCOVER_COLLISION_STATE="$TMPDIR/discover-collision-state.json"
+python3 - "$SIDUS_IMPORTED_STATE" "$DISCOVER_COLLISION_STATE" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1], sys.argv[2]
+with open(source, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+payload["fixtures"] = [fixture for fixture in payload["fixtures"] if fixture.get("node_address") != 7]
+payload["runtime"]["source_address"] = 7
+with open(target, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh)
+    fh.write("\n")
+PY
+FAKE_DISCOVER_ROOT="$TMPDIR/fake-discover-root"
+mkdir -p "$FAKE_DISCOVER_ROOT/bin"
+cat > "$FAKE_DISCOVER_ROOT/bin/amaran" <<'SH'
+#!/bin/sh
+cat <<'JSON'
+{
+  "address": 7,
+  "cct": {
+    "sleep_mode": 1,
+    "cct": 5600,
+    "intensity": 180
+  }
+}
+JSON
+SH
+chmod +x "$FAKE_DISCOVER_ROOT/bin/amaran"
+DISCOVER_COLLISION_OUTPUT="$("$ROOT/scripts/discover-existing-mesh" --root "$FAKE_DISCOVER_ROOT" --state-path "$DISCOVER_COLLISION_STATE" --range 7 --update-state)"
+assert_contains "$DISCOVER_COLLISION_OUTPUT" "discovered 1 fixtures" "discover source collision summary"
+assert_contains "$DISCOVER_COLLISION_OUTPUT" "runtime source moved 7->" "discover source collision relocation"
+assert_contains "$DISCOVER_COLLISION_OUTPUT" "fixture-7" "discover source collision fixture"
+python3 - "$DISCOVER_COLLISION_STATE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+if payload["runtime"]["source_address"] == 7:
+    raise SystemExit("runtime source address was not relocated")
+if not any(fixture.get("node_address") == 7 for fixture in payload["fixtures"]):
+    raise SystemExit("discovered fixture was not kept")
+PY
+
 NODE_RESET_DRY_RUN_OUTPUT="$("$ROOT/bin/amaran" config-node-reset-test --dry-run --state-path "$STATE_WITH_SECRETS")"
 assert_contains "$NODE_RESET_DRY_RUN_OUTPUT" "Config Node Reset dry run: ready" "node reset dry-run summary"
 assert_contains "$NODE_RESET_DRY_RUN_OUTPUT" "redaction-test" "node reset dry-run fixture"
@@ -523,6 +569,7 @@ for output in \
   "$SCENE_SHOW_OUTPUT" \
   "$SCENE_SHOW_JSON_OUTPUT" \
   "$LEGACY_SCENE_SHOW_OUTPUT" \
+  "$DISCOVER_COLLISION_OUTPUT" \
   "$NODE_RESET_DRY_RUN_OUTPUT" \
   "$NODE_RESET_DRY_RUN_JSON" \
   "$INSTALL_OUTPUT"
