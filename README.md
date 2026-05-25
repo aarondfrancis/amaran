@@ -5,8 +5,9 @@ Local CLI control for owned amaran fixtures on macOS.
 The CLI keeps its own JSON studio manifest in
 `~/Library/Application Support/amaran-cli/state.json` and talks to fixtures
 directly through the signed `BluetoothProbe.app` CoreBluetooth helper. Runtime
-commands are direct: there is no Desktop database import command and no
-Desktop helper fallback.
+commands are direct: there is no Desktop helper fallback. The recommended
+studio flow is to keep Sidus Link Pro on the iPad as the pairing source of
+truth, then import that mesh metadata from an encrypted local iPad backup.
 
 ```sh
 ./bin/amaran help
@@ -32,8 +33,14 @@ Desktop helper fallback.
 ./bin/amaran config-node-reset-test --dry-run
 ./bin/amaran config-node-reset-test --confirm-reset
 ./bin/amaran join-capture --output-state /private/tmp/amaran-sidus-capture.json --timeout 120
+./bin/amaran sidus-import --backup /private/tmp/Backup
 ./bin/amaran state-join /tmp/sidus-join.json
 ./bin/amaran state-install /tmp/amaran-test-state.json
+./bin/amaran discover --range 2-64 --update-state
+./bin/amaran scene capture "recording scene"
+./bin/amaran scene apply "recording scene"
+./bin/amaran scene list
+./bin/amaran scene show "recording scene"
 ./bin/amaran list
 ./bin/amaran probe
 ./bin/amaran status
@@ -77,6 +84,60 @@ Install an externally prepared or test state only after inspection:
 counters, writes the target with `0600` permissions, refuses to overwrite an
 existing target state file, and prints only redacted fixture summaries.
 
+## Sidus-First Studio Flow
+
+Use this when the iPad should remain the source of truth for pairing, grouping,
+and fixture setup:
+
+```sh
+# Pair and arrange fixtures in Sidus Link Pro first.
+
+# Create an encrypted local iPad backup in Finder, then import it.
+./bin/amaran sidus-import --backup /private/tmp/Backup
+
+# Confirm local control.
+./bin/amaran list
+./bin/amaran status --node 7
+
+# Save and recall live looks.
+./bin/amaran scene capture "recording scene"
+./bin/amaran scene apply "recording scene"
+```
+
+`sidus-import` accepts either an iPad backup directory or an extracted Sidus app
+container. Encrypted backups require the Python package
+`iphone_backup_decrypt`; the command prompts for the backup password unless
+`AMARAN_IOS_BACKUP_PASSWORD` is set. It writes the normal CLI state file with
+`0600` permissions, refuses to overwrite existing state unless `--replace` is
+passed, and prints only redacted fixture summaries.
+
+If you add fixtures in Sidus Link Pro and the mesh keys did not change, the CLI
+can scan candidate unicast addresses and optionally keep responsive fixtures:
+
+```sh
+./bin/amaran discover --range 2-64
+./bin/amaran discover --range 2-64 --update-state
+```
+
+`discover` uses the existing NetKey/AppKey and status command to find addresses
+that answer on the current mesh. It can add runtime control entries, but it
+cannot recover new DeviceKeys or Sidus-only metadata. Take a fresh encrypted
+iPad backup and rerun `sidus-import --replace` when you need updated names,
+MACs, DeviceKeys, app metadata, or if Sidus creates a new mesh/AppKey.
+
+Scenes live in the same local state file:
+
+```sh
+./bin/amaran scene capture "recording scene"
+./bin/amaran scene list
+./bin/amaran scene show "recording scene"
+./bin/amaran scene apply "recording scene"
+```
+
+`scene capture` reads live fixture status and stores intensity, CCT, and sleep
+state. `scene apply` sends direct runtime commands back to each fixture. Both
+commands use the mesh keys in local state, but command output remains redacted.
+
 ## Joining An Existing Mesh
 
 If another provisioner can supply the mesh NetKey, AppKey, IV index, and fixture
@@ -91,8 +152,8 @@ fixtures:
 
 `state-join` writes a control-only CLI state when DeviceKeys are missing.
 Runtime commands work from NetKey/AppKey, but Config diagnostics and destructive
-node reset are unavailable for control-only fixtures. This command does not
-extract keys from Sidus Link Pro or amaran Desktop. See
+node reset are unavailable for control-only fixtures. This command expects you
+to supply keys yourself; use `sidus-import` for the local iPad backup path. See
 [`docs/mesh-join.md`](docs/mesh-join.md) for the join manifest format and the
 remaining no-reset options.
 
@@ -106,6 +167,28 @@ This makes the Mac advertise as an unprovisioned Bluetooth Mesh node so Sidus
 Link Pro can try to provision it. If Sidus accepts the dummy node, the capture
 file gets the mesh NetKey and dummy node DeviceKey. It does not yet capture the
 mesh AppKey, so it is not enough by itself to control existing fixtures.
+
+For the nRF52840 DK join probe, read a redacted capture summary with:
+
+```sh
+scripts/read-dk-capture
+```
+
+The live iPad attempt loop is:
+
+```sh
+scripts/dk-sidus-attempt prepare
+# Run the Sidus Link Pro add-fixture flow.
+scripts/dk-sidus-attempt read --output /private/tmp/amaran-dk-sidus-attempt.hex
+```
+
+If the DK capture contains both NetKey and AppKey, convert it into a
+`state-join` source without printing keys:
+
+```sh
+scripts/dk-capture-to-state-join --capture /private/tmp/amaran-dk-capture.hex --output /private/tmp/sidus-join.json --fixture 2=Key
+./bin/amaran state-join /private/tmp/sidus-join.json
+```
 
 ## Pairing
 
@@ -182,9 +265,15 @@ State and pairing commands manage local state and fixture setup.
 | --- | --- |
 | `./bin/amaran doctor [--json]` | Inspect local state, safe runtime counters, and control readiness. |
 | `./bin/amaran pair [--add] [--attention <0-255>] [--dry-run] [--verify] [--json]` | Provision an unprovisioned fixture, configure it for vendor control, and write local state. Creates the first manifest, or appends to the existing studio manifest with `--add`. |
+| `./bin/amaran sidus-import --backup <path> [--mesh <selector>] [--replace] [--json]` | Import mesh keys and fixture metadata from an iPad Sidus Link Pro backup or extracted app container. Writes redacted output only. |
 | `./bin/amaran join-capture --output-state <capture.json> [--timeout <sec>] [--json]` | Experimental no-reset diagnostic. Advertises this Mac as an unprovisioned Mesh node and captures provisioning credentials from Sidus Link Pro. Output is redacted; the capture file is key-bearing. |
 | `./bin/amaran state-join <join-state.json> [--json]` | Join an existing mesh for runtime control from externally supplied NetKey/AppKey metadata. Writes control-only fixture state when DeviceKeys are absent. |
 | `./bin/amaran state-install <source-state.json> [--json]` | Validate and install a state file with `0600` permissions. Refuses to overwrite existing target state. |
+| `./bin/amaran discover --range <spec> [--update-state] [--json]` | Probe candidate unicast addresses on the current mesh and optionally keep responsive control-only fixture entries. |
+| `./bin/amaran scene capture <name> [--json]` | Read live status from fixtures and save a named scene in local state. |
+| `./bin/amaran scene apply <name> [--json]` | Apply a saved scene through direct runtime commands. |
+| `./bin/amaran scene list [--json]` | List saved scenes without launching BLE. |
+| `./bin/amaran scene show <name> [--json]` | Show one saved scene without launching BLE. |
 
 Diagnostic commands are lower-level tools for discovery, provisioning, control
 packet testing, and Config Client work.
@@ -218,6 +307,11 @@ Global options:
 | `--add` | For `pair`/`provision-test`, append an unprovisioned fixture to the existing studio manifest instead of creating a new mesh. |
 | `--state-path <p>` | Local CLI state file. Defaults to `AMARAN_CLI_STATE_PATH` or `~/Library/Application Support/amaran-cli/state.json`. |
 | `--output-state <p>` | Secret capture output for `join-capture`. The file is created with `0600` permissions and is never printed. |
+| `--backup <path>` | iPad backup or extracted Sidus app container for `sidus-import`. |
+| `--mesh <selector>` | Pick a Sidus mesh by name, UUID, or mesh file path substring. |
+| `--replace` | For `sidus-import`, overwrite the target CLI state file. |
+| `--range <spec>` | Address range for `discover`, such as `2-32` or `2-8,12`. |
+| `--update-state` | For `discover`, keep newly responsive fixture entries in local state. |
 | `--dry-run` | For `pair`, preflight and scan only. For node reset, validate and print the selected fixture without sending reset. |
 | `--verify` | For `pair`, read status after provisioning/configuration. |
 | `--confirm-reset` | Required for destructive Config Node Reset. |

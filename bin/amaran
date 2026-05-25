@@ -15,6 +15,13 @@ CONFIRM_RESET=0
 INTENSITY_OPT=""
 NATIVE_CONTROL_SPEC=""
 CAPTURE_STATE_PATH=""
+GATT_ALL_SERVICES=0
+GATT_READ_VALUES=0
+BACKUP_PATH=""
+MESH_SELECTOR=""
+REPLACE_STATE=0
+DISCOVER_RANGE=""
+DISCOVER_UPDATE_STATE=0
 
 usage() {
   cat <<'EOF'
@@ -25,8 +32,14 @@ Usage:
   amaran doctor [--json]
   amaran pair [--add] [--attention <0-255>] [--dry-run] [--verify] [--json]
   amaran join-capture --output-state <capture.json> [--timeout <sec>] [--json]
+  amaran sidus-import --backup <path> [--mesh <name-or-id>] [--replace] [--json]
   amaran state-join <join-state.json> [--json]
   amaran state-install <source-state.json> [--json]
+  amaran discover --range <start-end[,addr]> [--update-state] [--json]
+  amaran scene capture <name> [--json]
+  amaran scene apply <name> [--json]
+  amaran scene list [--json]
+  amaran scene show <name> [--json]
   amaran list [--json]
   amaran probe [--node <id>] [--json]
   amaran status [--node <id>] [--json]
@@ -36,7 +49,7 @@ Usage:
   amaran cct <kelvin> [--intensity <0-100>] [--node <id>]
 
 Diagnostics:
-  amaran gatt-probe [--json]
+  amaran gatt-probe [--all-services] [--read-values] [--json]
   amaran provision-scan [--json]
   amaran provision-invite-test [--attention <0-255>] [--json]
   amaran provision-test [--add] [--attention <0-255>] [--json]
@@ -64,10 +77,21 @@ Options:
                      ~/Library/Application Support/amaran-cli/state.json.
   --output-state <p> Secret capture output for join-capture. This file is
                      created with 0600 permissions and is never printed.
+  --backup <path>    iPad backup or extracted Sidus app container for
+                     sidus-import.
+  --mesh <selector>  Pick a Sidus mesh by name, UUID, or mesh file path
+                     substring when a backup contains more than one.
+  --replace          For sidus-import only, overwrite the target CLI state.
+  --range <spec>     Address range for discover, such as 2-32 or 2-8,12.
+  --update-state     For discover, keep newly responsive fixture entries in
+                     local state. Without it, only sequence counters persist.
   --dry-run          For pair, preflight + scan only. For node reset, validate
                      and print the selected fixture without sending reset.
   --verify           For pair, read status after provisioning/config.
   --confirm-reset    Allow destructive Config Node Reset.
+  --all-services     For gatt-probe, discover all advertised peripheral
+                     services after selecting a mesh device.
+  --read-values      For gatt-probe, read safe readable characteristic values.
   --json             Print JSON where supported. JSON output must not include
                      mesh, app, or device keys.
   --help, -h         Show this help.
@@ -83,6 +107,9 @@ Stable runtime commands:
 
 State and pairing:
   doctor         Inspect local state, runtime counters, and control readiness.
+  sidus-import   Import a Sidus Link Pro iPad backup into local CLI state. This
+                 preserves iPad as the pairing source of truth and lets the CLI
+                 control fixtures on the same mesh. Output is redacted.
   join-capture   Experimental: advertise this Mac as an unprovisioned Mesh
                  device so Sidus Link Pro can provision it. Captures NetKey and
                  the fake node DeviceKey only; AppKey capture is still separate
@@ -93,9 +120,16 @@ State and pairing:
                  control, and write local state. Creates the first studio
                  manifest, or appends with --add.
   state-install  Validate and install a state file with 0600 permissions.
+  discover       Probe addresses in the current mesh and optionally add
+                 responsive control-only fixtures to local state.
+  scene          Capture, list, show, and apply named fixture states. Capturing
+                 reads live status; applying sends direct runtime commands.
 
 Diagnostics:
   gatt-probe                       Discover Mesh Proxy/Provisioning services.
+                                   Add --all-services to dump the selected
+                                   peripheral's full GATT service list, and
+                                   --read-values to read readable values.
   provision-scan              Scan for unprovisioned PB-GATT advertisers.
   provision-invite-test       Send only Provisioning Invite.
   provision-test              Run PB-GATT provisioning and write/append state.
@@ -113,6 +147,25 @@ Environment:
   AMARAN_NODE_ID               Default --node.
   AMARAN_TIMEOUT               Default --timeout.
   AMARAN_ATTENTION_DURATION    Default --attention.
+
+Sidus-first studio workflow:
+  1. Pair and organize fixtures in Sidus Link Pro on the iPad.
+  2. Create an encrypted local iPad backup in Finder, then import it:
+       ./bin/amaran sidus-import --backup /path/to/Backup
+  3. Confirm CLI control sees the same mesh:
+       ./bin/amaran list
+       ./bin/amaran status --node 7
+  4. When Sidus adds more fixtures to the same mesh, discover responsive
+     addresses without re-pairing through the CLI:
+       ./bin/amaran discover --range 2-64 --update-state
+  5. Save and recall lighting looks:
+       ./bin/amaran scene capture "recording scene"
+       ./bin/amaran scene apply "recording scene"
+
+  A fresh Sidus backup is still the authoritative way to import Sidus app
+  metadata, DeviceKeys, or a changed mesh/AppKey. discover can find runtime
+  control addresses on an already imported mesh, but it cannot recover new
+  DeviceKeys.
 
 Pairing a new fixture:
   1. Factory-reset the fixture, or use a fixture that has never been provisioned.
@@ -132,7 +185,11 @@ Pairing a new fixture:
 Examples:
   ./bin/amaran doctor
   ./bin/amaran join-capture --output-state /private/tmp/amaran-sidus-capture.json --timeout 120
+  ./bin/amaran sidus-import --backup /private/tmp/Backup
   ./bin/amaran state-join /tmp/sidus-join.json
+  ./bin/amaran discover --range 2-64 --update-state
+  ./bin/amaran scene capture "recording scene"
+  ./bin/amaran scene apply "recording scene"
   ./bin/amaran pair --dry-run --state-path /tmp/amaran-state.json
   ./bin/amaran pair --verify --state-path /tmp/amaran-state.json
   ./bin/amaran pair --add --verify
@@ -143,8 +200,10 @@ Examples:
 
 Safety:
   Runtime commands require local state and use the Bluetooth helper directly.
-  There is no Desktop database import or helper fallback. The state file
-  contains mesh/app/device keys; do not commit, share, print, or log it.
+  There is no Desktop database import or helper fallback. sidus-import reads a
+  user-supplied iPad backup or extracted Sidus container and writes local CLI
+  state. The state file contains mesh/app/device keys; do not commit, share,
+  print, or log it.
   state-join requires keys from another provisioner; it does not extract keys
   from Sidus Link Pro or amaran Desktop.
   join-capture writes captured keys to the requested --output-state file but
@@ -213,6 +272,39 @@ while [[ $# -gt 0 ]]; do
       esac
       shift 2
       ;;
+    --backup)
+      [[ $# -ge 2 ]] || { echo "amaran: --backup requires a path" >&2; exit 1; }
+      case "$2" in
+        "~")
+          BACKUP_PATH="$HOME"
+          ;;
+        "~/"*)
+          BACKUP_PATH="$HOME/${2#"~/"}"
+          ;;
+        *)
+          BACKUP_PATH="$2"
+          ;;
+      esac
+      shift 2
+      ;;
+    --mesh)
+      [[ $# -ge 2 ]] || { echo "amaran: --mesh requires a selector" >&2; exit 1; }
+      MESH_SELECTOR="$2"
+      shift 2
+      ;;
+    --replace)
+      REPLACE_STATE=1
+      shift
+      ;;
+    --range)
+      [[ $# -ge 2 ]] || { echo "amaran: --range requires an address range" >&2; exit 1; }
+      DISCOVER_RANGE="$2"
+      shift 2
+      ;;
+    --update-state)
+      DISCOVER_UPDATE_STATE=1
+      shift
+      ;;
     --intensity)
       [[ $# -ge 2 ]] || { echo "amaran: --intensity requires a value" >&2; exit 1; }
       INTENSITY_OPT="$2"
@@ -236,6 +328,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --confirm-reset)
       CONFIRM_RESET=1
+      shift
+      ;;
+    --all-services)
+      GATT_ALL_SERVICES=1
+      shift
+      ;;
+    --read-values)
+      GATT_READ_VALUES=1
       shift
       ;;
     --help|-h)
@@ -295,8 +395,43 @@ if [[ "$CONFIRM_RESET" == "1" && "$COMMAND" != "config-node-reset-test" ]]; then
   exit 1
 fi
 
+if [[ "$GATT_ALL_SERVICES" == "1" && "$COMMAND" != "gatt-probe" ]]; then
+  echo "amaran: --all-services is only supported for gatt-probe" >&2
+  exit 1
+fi
+
+if [[ "$GATT_READ_VALUES" == "1" && "$COMMAND" != "gatt-probe" ]]; then
+  echo "amaran: --read-values is only supported for gatt-probe" >&2
+  exit 1
+fi
+
 if [[ -n "$CAPTURE_STATE_PATH" && "$COMMAND" != "join-capture" ]]; then
   echo "amaran: --output-state is only supported for join-capture" >&2
+  exit 1
+fi
+
+if [[ -n "$BACKUP_PATH" && "$COMMAND" != "sidus-import" ]]; then
+  echo "amaran: --backup is only supported for sidus-import" >&2
+  exit 1
+fi
+
+if [[ -n "$MESH_SELECTOR" && "$COMMAND" != "sidus-import" ]]; then
+  echo "amaran: --mesh is only supported for sidus-import" >&2
+  exit 1
+fi
+
+if [[ "$REPLACE_STATE" == "1" && "$COMMAND" != "sidus-import" ]]; then
+  echo "amaran: --replace is only supported for sidus-import" >&2
+  exit 1
+fi
+
+if [[ -n "$DISCOVER_RANGE" && "$COMMAND" != "discover" ]]; then
+  echo "amaran: --range is only supported for discover" >&2
+  exit 1
+fi
+
+if [[ "$DISCOVER_UPDATE_STATE" == "1" && "$COMMAND" != "discover" ]]; then
+  echo "amaran: --update-state is only supported for discover" >&2
   exit 1
 fi
 
@@ -1158,11 +1293,77 @@ else:
 PY
 }
 
+run_sidus_import() {
+  [[ -n "$BACKUP_PATH" ]] || { echo "amaran: sidus-import requires --backup <path>" >&2; exit 1; }
+
+  local args=("$ROOT/scripts/sidus-backup-import" --backup "$BACKUP_PATH" --state-path "$STATE_PATH")
+  if [[ -n "$MESH_SELECTOR" ]]; then
+    args+=(--mesh "$MESH_SELECTOR")
+  fi
+  if [[ "$REPLACE_STATE" == "1" ]]; then
+    args+=(--replace)
+  fi
+  if [[ "$JSON" == "1" ]]; then
+    args+=(--json)
+  fi
+  "${args[@]}"
+}
+
+run_discover_command() {
+  if [[ ! -s "$STATE_PATH" ]]; then
+    echo "amaran: discover requires local state at $STATE_PATH" >&2
+    return 1
+  fi
+
+  local range_spec="${DISCOVER_RANGE:-2-64}"
+  local args=("$ROOT/scripts/discover-existing-mesh" --root "$ROOT" --state-path "$STATE_PATH" --range "$range_spec")
+  if [[ "$DISCOVER_UPDATE_STATE" == "1" ]]; then
+    args+=(--update-state)
+  fi
+  if [[ "$JSON" == "1" ]]; then
+    args+=(--json)
+  fi
+  "${args[@]}"
+}
+
+run_scene_command() {
+  if [[ ! -s "$STATE_PATH" ]]; then
+    echo "amaran: scene requires local state at $STATE_PATH" >&2
+    return 1
+  fi
+  [[ ${#POSITIONALS[@]} -ge 1 ]] || { echo "amaran: scene requires capture, apply, list, or show" >&2; exit 1; }
+
+  local action="$POSITIONALS[1]"
+  case "$action" in
+    capture|apply|list|show)
+      ;;
+    *)
+      echo "amaran: scene requires capture, apply, list, or show" >&2
+      exit 1
+      ;;
+  esac
+
+  local args=("$ROOT/scripts/scene-store" --root "$ROOT" --state-path "$STATE_PATH")
+  if [[ "$JSON" == "1" ]]; then
+    args+=(--json)
+  fi
+  args+=("${POSITIONALS[@]}")
+  "${args[@]}"
+}
+
 run_native_probe() {
   local output
   output="$(mktemp -t amaran-gatt-probe)"
 
-  launch_app "$NATIVE_APP" --output "$output" --timeout "$TIMEOUT"
+  local args=(--output "$output" --timeout "$TIMEOUT")
+  if [[ "$GATT_ALL_SERVICES" == "1" ]]; then
+    args+=(--discover-all-services)
+  fi
+  if [[ "$GATT_READ_VALUES" == "1" ]]; then
+    args+=(--read-characteristics)
+  fi
+
+  launch_app "$NATIVE_APP" "${args[@]}"
 
   if [[ ! -s "$output" ]]; then
     rm -f "$output"
@@ -1210,10 +1411,11 @@ PY
 run_native_state_probe() {
   local output
   output="$(mktemp -t amaran-state-probe)"
-  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --proxy-state-probe)
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH")
   if [[ -n "$NODE_ID" ]]; then
     args+=(--node "$NODE_ID")
   fi
+  args+=(--proxy-state-probe)
 
   launch_app "$NATIVE_APP" "${args[@]}"
 
@@ -2022,10 +2224,11 @@ run_native_sig_onoff_test() {
   local value="$1"
   local output
   output="$(mktemp -t amaran-sig-onoff-test)"
-  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --sig-onoff-test "$value")
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH")
   if [[ -n "$NODE_ID" ]]; then
     args+=(--node "$NODE_ID")
   fi
+  args+=(--sig-onoff-test "$value")
 
   launch_app "$NATIVE_APP" "${args[@]}"
 
@@ -2093,10 +2296,11 @@ run_native_control_app() {
   local output_style="${2:-test}"
   local output
   output="$(mktemp -t amaran-control-test)"
-  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --control-test "$spec")
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH")
   if [[ -n "$NODE_ID" ]]; then
     args+=(--node "$NODE_ID")
   fi
+  args+=(--control-test "$spec")
 
   launch_app "$NATIVE_APP" "${args[@]}"
 
@@ -2152,10 +2356,11 @@ run_native_status_app() {
   local output_style="${1:-status}"
   local output
   output="$(mktemp -t amaran-status-test)"
-  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --status-test)
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH")
   if [[ -n "$NODE_ID" ]]; then
     args+=(--node "$NODE_ID")
   fi
+  args+=(--status-test)
 
   launch_app "$NATIVE_APP" "${args[@]}"
 
@@ -2377,10 +2582,11 @@ capture_native_configure_json_with_retry() {
 run_native_config_composition_get_test() {
   local output
   output="$(mktemp -t amaran-config-composition-get-test)"
-  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --config-composition-get-test)
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH")
   if [[ -n "$NODE_ID" ]]; then
     args+=(--node "$NODE_ID")
   fi
+  args+=(--config-composition-get-test)
 
   launch_app "$NATIVE_APP" "${args[@]}"
 
@@ -2427,10 +2633,11 @@ PY
 run_native_config_appkey_get_test() {
   local output
   output="$(mktemp -t amaran-config-appkey-get-test)"
-  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --config-appkey-get-test)
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH")
   if [[ -n "$NODE_ID" ]]; then
     args+=(--node "$NODE_ID")
   fi
+  args+=(--config-appkey-get-test)
 
   launch_app "$NATIVE_APP" "${args[@]}"
 
@@ -2483,10 +2690,11 @@ PY
 run_native_config_appkey_add_test() {
   local output
   output="$(mktemp -t amaran-config-appkey-add-test)"
-  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --config-appkey-add-test)
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH")
   if [[ -n "$NODE_ID" ]]; then
     args+=(--node "$NODE_ID")
   fi
+  args+=(--config-appkey-add-test)
 
   launch_app "$NATIVE_APP" "${args[@]}"
 
@@ -2530,10 +2738,11 @@ PY
 run_native_config_model_app_bind_test() {
   local output
   output="$(mktemp -t amaran-config-model-app-bind-test)"
-  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --config-model-app-bind-test)
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH")
   if [[ -n "$NODE_ID" ]]; then
     args+=(--node "$NODE_ID")
   fi
+  args+=(--config-model-app-bind-test)
 
   launch_app "$NATIVE_APP" "${args[@]}"
 
@@ -2757,10 +2966,11 @@ run_native_config_node_reset_test() {
 
   local output
   output="$(mktemp -t amaran-config-node-reset-test)"
-  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH" --config-node-reset-test --confirm-reset)
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH")
   if [[ -n "$NODE_ID" ]]; then
     args+=(--node "$NODE_ID")
   fi
+  args+=(--config-node-reset-test --confirm-reset)
 
   launch_app "$NATIVE_APP" "${args[@]}"
 
@@ -2937,6 +3147,9 @@ case "$COMMAND" in
   join-capture)
     run_native_join_capture
     ;;
+  sidus-import)
+    run_sidus_import
+    ;;
   pair-test)
     run_native_onboard_test
     ;;
@@ -2985,6 +3198,12 @@ case "$COMMAND" in
     ;;
   state-join)
     run_state_join
+    ;;
+  discover)
+    run_discover_command
+    ;;
+  scene)
+    run_scene_command
     ;;
   list)
     run_list_command

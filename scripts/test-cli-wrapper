@@ -44,10 +44,18 @@ HELP_OUTPUT="$("$ROOT/bin/amaran" --help)"
 HELP_ALIAS_OUTPUT="$("$ROOT/bin/amaran" help)"
 assert_contains "$HELP_OUTPUT" "amaran pair [--add] [--attention <0-255>] [--dry-run] [--verify] [--json]" "help pair usage"
 assert_contains "$HELP_OUTPUT" "amaran pair-test [--add] [--attention <0-255>] [--dry-run] [--verify] [--json]" "help pair-test usage"
+assert_contains "$HELP_OUTPUT" "amaran sidus-import --backup <path>" "help sidus-import usage"
 assert_contains "$HELP_OUTPUT" "amaran state-join <join-state.json> [--json]" "help state-join usage"
+assert_contains "$HELP_OUTPUT" "amaran discover --range <start-end" "help discover usage"
+assert_contains "$HELP_OUTPUT" "amaran scene capture <name>" "help scene capture usage"
+assert_contains "$HELP_OUTPUT" "amaran scene apply <name>" "help scene apply usage"
 assert_contains "$HELP_OUTPUT" "config-node-reset-test [--dry-run|--confirm-reset]" "help node reset usage"
 assert_contains "$HELP_OUTPUT" "--state-path <p>" "help state path option"
+assert_contains "$HELP_OUTPUT" "--backup <path>" "help backup option"
+assert_contains "$HELP_OUTPUT" "--range <spec>" "help range option"
+assert_contains "$HELP_OUTPUT" "--update-state" "help update-state option"
 assert_contains "$HELP_OUTPUT" "Runtime commands require local state" "help local-state safety note"
+assert_contains "$HELP_OUTPUT" "Sidus-first studio workflow" "help Sidus workflow"
 assert_contains "$HELP_OUTPUT" "pair --add" "help pair add flow"
 assert_contains "$HELP_OUTPUT" "--dry-run" "help dry run option"
 assert_contains "$HELP_OUTPUT" "--verify" "help verify option"
@@ -96,6 +104,18 @@ if "$ROOT/bin/amaran" status --confirm-reset >"$INVALID_CONFIRM_RESET_OUTPUT" 2>
   fail "status --confirm-reset should fail"
 fi
 assert_contains "$(cat "$INVALID_CONFIRM_RESET_OUTPUT")" "--confirm-reset is only supported" "invalid confirm-reset guard"
+
+INVALID_BACKUP_OUTPUT="$TMPDIR/invalid-backup.out"
+if "$ROOT/bin/amaran" status --backup "$TMPDIR" >"$INVALID_BACKUP_OUTPUT" 2>&1; then
+  fail "status --backup should fail"
+fi
+assert_contains "$(cat "$INVALID_BACKUP_OUTPUT")" "--backup is only supported for sidus-import" "invalid backup guard"
+
+INVALID_UPDATE_STATE_OUTPUT="$TMPDIR/invalid-update-state.out"
+if "$ROOT/bin/amaran" status --update-state >"$INVALID_UPDATE_STATE_OUTPUT" 2>&1; then
+  fail "status --update-state should fail"
+fi
+assert_contains "$(cat "$INVALID_UPDATE_STATE_OUTPUT")" "--update-state is only supported for discover" "invalid update-state guard"
 
 NODE_RESET_CONFIRM_OUTPUT="$TMPDIR/node-reset-confirm.out"
 if "$ROOT/bin/amaran" config-node-reset-test --state-path "$TMPDIR/missing-state.json" >"$NODE_RESET_CONFIRM_OUTPUT" 2>&1; then
@@ -194,6 +214,119 @@ cat > "$STATE_WITH_SECRETS" <<JSON
   }
 }
 JSON
+
+FAKE_SIDUS_BACKUP="$TMPDIR/fake-sidus-extract"
+mkdir -p "$FAKE_SIDUS_BACKUP/AppDomain-com.siduslink.cn.Acrux.hd/Documents/mesh"
+cat > "$FAKE_SIDUS_BACKUP/AppDomain-com.siduslink.cn.Acrux.hd/Documents/mesh/Studio.json" <<JSON
+{
+  "meshName": "Studio",
+  "meshUUID": "FAKESTUDIOMESH",
+  "netKeys": [
+    {
+      "index": 0,
+      "key": "$NET_KEY_SENTINEL",
+      "name": "NetKey 1",
+      "phase": 0,
+      "minSecurity": "secure"
+    }
+  ],
+  "appKeys": [
+    {
+      "index": 0,
+      "boundNetKey": 0,
+      "key": "$APP_KEY_SENTINEL",
+      "name": "AppKey 1"
+    }
+  ],
+  "nodes": [
+    {
+      "name": "ItonMeshProvisioner",
+      "unicastAddress": "0001",
+      "deviceKey": "$DEVICE_KEY_SENTINEL",
+      "UUID": "00112233445566778899AABBCCDDEEFF",
+      "elements": [{"index": 0}]
+    },
+    {
+      "name": "400M5-123C21",
+      "unicastAddress": "0007",
+      "MAC": "A4:C1:38:12:3C:21",
+      "deviceKey": "$DEVICE_KEY_SENTINEL",
+      "UUID": "$DEVICE_UUID_SENTINEL",
+      "elements": [{"index": 0}]
+    }
+  ],
+  "groups": [],
+  "provisioners": [],
+  "scenes": []
+}
+JSON
+
+SIDUS_IMPORTED_STATE="$TMPDIR/sidus-imported-state.json"
+SIDUS_IMPORT_OUTPUT="$("$ROOT/bin/amaran" sidus-import --backup "$FAKE_SIDUS_BACKUP" --state-path "$SIDUS_IMPORTED_STATE")"
+assert_contains "$SIDUS_IMPORT_OUTPUT" "imported Sidus mesh Studio with 1 fixture" "sidus-import summary"
+assert_contains "$SIDUS_IMPORT_OUTPUT" "400M5-123C21" "sidus-import fixture summary"
+assert_contains "$SIDUS_IMPORT_OUTPUT" "...123C21" "sidus-import mac suffix"
+test -s "$SIDUS_IMPORTED_STATE" || fail "sidus-import should write target state"
+SIDUS_IMPORTED_MODE="$(stat -f "%Lp" "$SIDUS_IMPORTED_STATE")"
+case "$SIDUS_IMPORTED_MODE" in
+  600)
+    ;;
+  *)
+    fail "sidus-import should write 0600 permissions, got $SIDUS_IMPORTED_MODE"
+    ;;
+esac
+SIDUS_IMPORT_EXISTING_OUTPUT="$TMPDIR/sidus-import-existing.out"
+if "$ROOT/bin/amaran" sidus-import --backup "$FAKE_SIDUS_BACKUP" --state-path "$SIDUS_IMPORTED_STATE" >"$SIDUS_IMPORT_EXISTING_OUTPUT" 2>&1; then
+  fail "sidus-import should refuse to overwrite target state"
+fi
+assert_contains "$(cat "$SIDUS_IMPORT_EXISTING_OUTPUT")" "target state file already exists" "sidus-import overwrite guard"
+SIDUS_IMPORT_JSON_OUTPUT="$("$ROOT/bin/amaran" sidus-import --replace --json --backup "$FAKE_SIDUS_BACKUP" --state-path "$SIDUS_IMPORTED_STATE")"
+assert_contains "$SIDUS_IMPORT_JSON_OUTPUT" '"imported": true' "sidus-import json"
+assert_contains "$SIDUS_IMPORT_JSON_OUTPUT" '"fixture_count": 1' "sidus-import json fixture count"
+SIDUS_DOCTOR_OUTPUT="$("$ROOT/bin/amaran" doctor --state-path "$SIDUS_IMPORTED_STATE")"
+assert_contains "$SIDUS_DOCTOR_OUTPUT" "fixtures 1" "sidus-import doctor fixture count"
+assert_contains "$SIDUS_DOCTOR_OUTPUT" "runtime ready" "sidus-import doctor readiness"
+SIDUS_LIST_OUTPUT="$("$ROOT/bin/amaran" list --state-path "$SIDUS_IMPORTED_STATE")"
+assert_contains "$SIDUS_LIST_OUTPUT" "400M5-123C21" "sidus-import list fixture"
+
+python3 - "$SIDUS_IMPORTED_STATE" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+payload.setdefault("scenes", {})["recording scene"] = {
+    "captured_at": "2026-05-25T00:00:00Z",
+    "fixtures": [
+        {
+            "node_address": 7,
+            "name": "400M5-123C21",
+            "mac_suffix": "123C21",
+            "intensity": 18,
+            "cct": 5600,
+            "sleep_mode": 1,
+        }
+    ],
+}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh)
+    fh.write("\n")
+PY
+SCENE_LIST_OUTPUT="$("$ROOT/bin/amaran" scene list --state-path "$SIDUS_IMPORTED_STATE")"
+assert_contains "$SCENE_LIST_OUTPUT" "recording scene" "scene list"
+SCENE_SHOW_OUTPUT="$("$ROOT/bin/amaran" scene show "recording scene" --state-path "$SIDUS_IMPORTED_STATE")"
+assert_contains "$SCENE_SHOW_OUTPUT" "400M5-123C21" "scene show fixture"
+assert_contains "$SCENE_SHOW_OUTPUT" "5600K" "scene show cct"
+SCENE_SHOW_JSON_OUTPUT="$("$ROOT/bin/amaran" scene show "recording scene" --json --state-path "$SIDUS_IMPORTED_STATE")"
+assert_contains "$SCENE_SHOW_JSON_OUTPUT" '"fixture_count": 1' "scene show json"
+
+DISCOVER_INVALID_OUTPUT="$TMPDIR/discover-invalid.out"
+if "$ROOT/bin/amaran" discover --range bad --state-path "$SIDUS_IMPORTED_STATE" >"$DISCOVER_INVALID_OUTPUT" 2>&1; then
+  fail "discover should reject invalid ranges before BLE"
+fi
+assert_contains "$(cat "$DISCOVER_INVALID_OUTPUT")" "invalid --range" "discover invalid range guard"
+assert_not_contains "$(cat "$DISCOVER_INVALID_OUTPUT")" "Traceback" "discover invalid range traceback"
 
 NODE_RESET_DRY_RUN_OUTPUT="$("$ROOT/bin/amaran" config-node-reset-test --dry-run --state-path "$STATE_WITH_SECRETS")"
 assert_contains "$NODE_RESET_DRY_RUN_OUTPUT" "Config Node Reset dry run: ready" "node reset dry-run summary"
@@ -366,6 +499,13 @@ for output in \
   "$JOIN_OUTPUT" \
   "$JOIN_DOCTOR_OUTPUT" \
   "$("$ROOT/bin/amaran" list --state-path "$JOINED_STATE")" \
+  "$SIDUS_IMPORT_OUTPUT" \
+  "$SIDUS_IMPORT_JSON_OUTPUT" \
+  "$SIDUS_DOCTOR_OUTPUT" \
+  "$SIDUS_LIST_OUTPUT" \
+  "$SCENE_LIST_OUTPUT" \
+  "$SCENE_SHOW_OUTPUT" \
+  "$SCENE_SHOW_JSON_OUTPUT" \
   "$NODE_RESET_DRY_RUN_OUTPUT" \
   "$NODE_RESET_DRY_RUN_JSON" \
   "$INSTALL_OUTPUT"

@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+import argparse
+import getpass
+import json
+import os
+import sqlite3
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+APP_DOMAINS = (
+    "AppDomain-com.aputure.cn.SidusLink",
+    "AppDomain-com.siduslink.cn.Acrux.hd",
+)
+
+
+def fail(message):
+    print(f"amaran: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def is_hex(value, byte_count=None):
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text or len(text) % 2:
+        return False
+    if byte_count is not None and len(text) != byte_count * 2:
+        return False
+    return all(ch in "0123456789abcdefABCDEF" for ch in text)
+
+
+def normalize_hex(value, byte_count=None):
+    text = "".join(ch for ch in str(value or "") if ch in "0123456789abcdefABCDEF").lower()
+    if byte_count is not None and len(text) != byte_count * 2:
+        return ""
+    return text
+
+
+def parse_address(value):
+    if isinstance(value, int):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("missing address")
+    try:
+        return int(text, 16)
+    except ValueError:
+        return int(text, 10)
+
+
+def normalize_mac(value):
+    text = "".join(ch for ch in str(value or "") if ch in "0123456789abcdefABCDEF").upper()
+    if len(text) != 12:
+        return ""
+    return ":".join(text[index:index + 2] for index in range(0, 12, 2))
+
+
+def mac_suffix(value):
+    return "".join(ch for ch in str(value or "") if ch in "0123456789abcdefABCDEF").upper()[-6:]
+
+
+def fixture_label(fixture):
+    if fixture.get("name"):
+        return str(fixture["name"])
+    suffix = mac_suffix(fixture.get("mac_address"))
+    code = fixture.get("code")
+    if code and suffix:
+        return f"{code}-{suffix}"
+    return suffix or f"fixture-{fixture.get('node_address', 'unknown')}"
+
+
+def safe_fixture(fixture):
+    return {
+        "name": fixture_label(fixture),
+        "address": fixture.get("node_address"),
+        "mac_suffix": mac_suffix(fixture.get("mac_address")),
+        "code": fixture.get("code"),
+        "control_only": bool(fixture.get("control_only")),
+    }
+
+
+def display_path(path):
+    home = str(Path.home())
+    absolute = os.path.abspath(os.path.expanduser(path))
+    if absolute == home:
+        return "~"
+    if absolute.startswith(home + os.sep):
+        return "~" + absolute[len(home):]
+    return absolute
+
+
+def find_backup_dir(path):
+    root = Path(path).expanduser().resolve()
+    if not root.exists():
+        fail(f"backup path not found: {root}")
+    if (root / "Manifest.plist").is_file() and (root / "Manifest.db").is_file():
+        return root
+    children = [child for child in root.iterdir() if child.is_dir() and (child / "Manifest.plist").is_file()]
+    if len(children) == 1:
+        return children[0]
+    return None
+
+
+def extracted_mesh_files(root):
+    root = Path(root).expanduser().resolve()
+    rows = []
+    for domain in APP_DOMAINS:
+        domain_root = root / domain
+        if not domain_root.exists():
+            continue
+        for path in sorted((domain_root / "Documents" / "mesh").glob("*.json")):
+            rows.append((domain, str(path.relative_to(domain_root)), path.read_bytes()))
+    if rows:
+        return rows
+    for path in sorted(root.rglob("Documents/mesh/*.json")):
+        domain = next((part for part in path.parts if part in APP_DOMAINS), "extracted")
+        rows.append((domain, str(path), path.read_bytes()))
+    return rows
+
+
+def unencrypted_backup_mesh_files(backup_dir):
+    manifest = backup_dir / "Manifest.db"
+    rows = []
+    conn = sqlite3.connect(f"file:{manifest}?mode=ro", uri=True)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            select fileID, domain, relativePath
+            from Files
+            where flags = 1
+              and domain in (?, ?)
+              and relativePath like 'Documents/mesh/%.json'
+            order by domain, relativePath
+            """,
+            APP_DOMAINS,
+        )
+        for file_id, domain, relative_path in cur.fetchall():
+            file_path = backup_dir / file_id[:2] / file_id
+            if file_path.is_file():
+                rows.append((domain, relative_path, file_path.read_bytes()))
+    finally:
+        conn.close()
+    return rows
+
+
+def encrypted_backup_mesh_files(backup_dir):
+    try:
+        from iphone_backup_decrypt import EncryptedBackup
+    except ImportError:
+        fail(
+            "encrypted iPad backup import requires Python package iphone_backup_decrypt; "
+            "install it in the Python used by ./bin/amaran"
+        )
+
+    password = os.environ.get("AMARAN_IOS_BACKUP_PASSWORD")
+    if not password:
+        password = getpass.getpass("iPad backup password: ")
+
+    backup = EncryptedBackup(backup_directory=str(backup_dir), passphrase=password)
+    backup.test_decryption()
+    rows = []
+    with backup.manifest_db_cursor() as cur:
+        cur.execute(
+            """
+            select domain, relativePath
+            from Files
+            where flags = 1
+              and domain in (?, ?)
+              and relativePath like 'Documents/mesh/%.json'
+            order by domain, relativePath
+            """,
+            APP_DOMAINS,
+        )
+        for domain, relative_path in cur.fetchall():
+            try:
+                data = backup.extract_file_as_bytes(relative_path, domain_like=domain)
+            except Exception:
+                continue
+            rows.append((domain, relative_path, data))
+    return rows
+
+
+def load_mesh_candidates(backup_path):
+    extracted = extracted_mesh_files(backup_path)
+    if extracted:
+        return extracted
+
+    backup_dir = find_backup_dir(backup_path)
+    if backup_dir is None:
+        fail("backup path does not look like an iPad backup or extracted Sidus app container")
+
+    try:
+        return unencrypted_backup_mesh_files(backup_dir)
+    except sqlite3.DatabaseError:
+        return encrypted_backup_mesh_files(backup_dir)
+
+
+def code_from_name(name):
+    text = str(name or "")
+    if "-" in text:
+        prefix = text.split("-", 1)[0]
+        if prefix and all(ch in "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" for ch in prefix):
+            return prefix
+    return ""
+
+
+def device_uuid_from_node(node):
+    for key in ("UUID", "uuid", "deviceUUID", "device_uuid"):
+        text = normalize_hex(node.get(key), 16)
+        if text:
+            return text
+    return ""
+
+
+def candidate_from_mesh(domain, relative_path, data):
+    try:
+        mesh = json.loads(data.decode("utf-8-sig"))
+    except Exception:
+        return None
+    if not isinstance(mesh, dict):
+        return None
+    net_keys = mesh.get("netKeys")
+    app_keys = mesh.get("appKeys")
+    nodes = mesh.get("nodes")
+    if not isinstance(net_keys, list) or not isinstance(app_keys, list) or not isinstance(nodes, list):
+        return None
+    if not net_keys or not app_keys:
+        return None
+    net_key = normalize_hex((net_keys[0] or {}).get("key"), 16)
+    app_key = normalize_hex((app_keys[0] or {}).get("key"), 16)
+    if not net_key or not app_key:
+        return None
+
+    fixtures = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        name = str(node.get("name") or "").strip()
+        try:
+            address = parse_address(node.get("unicastAddress"))
+        except Exception:
+            continue
+        if address <= 0 or address > 0x7FFF:
+            continue
+        if address == 1 or name == "ItonMeshProvisioner":
+            continue
+        elements = node.get("elements") if isinstance(node.get("elements"), list) else []
+        fixture = {
+            "uuid": str(node.get("UUID") or node.get("uuid") or f"sidus-{address}"),
+            "mac_address": normalize_mac(node.get("MAC")),
+            "code": code_from_name(name),
+            "name": name,
+            "node_address": address,
+            "composition_data": "",
+            "element_count": max(1, len(elements)),
+            "update_time": now_iso(),
+            "state": 0,
+        }
+        device_key = normalize_hex(node.get("deviceKey"), 16)
+        device_uuid = device_uuid_from_node(node)
+        if device_key:
+            fixture["device_key"] = device_key
+        if device_uuid:
+            fixture["device_uuid"] = device_uuid
+        fixture["control_only"] = not bool(device_key)
+        fixtures.append(fixture)
+
+    if not fixtures:
+        return None
+
+    mac_count = sum(1 for fixture in fixtures if fixture.get("mac_address"))
+    device_key_count = sum(1 for fixture in fixtures if fixture.get("device_key"))
+    return {
+        "domain": domain,
+        "relative_path": relative_path,
+        "mesh_name": str(mesh.get("meshName") or ""),
+        "mesh_uuid": str(mesh.get("meshUUID") or mesh.get("meshName") or "sidus-mesh"),
+        "net_key": net_key,
+        "app_key": app_key,
+        "fixtures": sorted(fixtures, key=lambda item: item["node_address"]),
+        "score": (len(fixtures), mac_count, device_key_count),
+    }
+
+
+def select_candidate(candidates, selector):
+    if not candidates:
+        fail("no Sidus mesh JSON files with NetKey/AppKey metadata were found")
+    if selector:
+        needle = selector.lower()
+        matches = [
+            item for item in candidates
+            if needle in item["mesh_name"].lower()
+            or needle in item["mesh_uuid"].lower()
+            or needle in item["relative_path"].lower()
+        ]
+        if not matches:
+            fail(f"no Sidus mesh matched --mesh {selector!r}")
+        candidates = matches
+    return sorted(candidates, key=lambda item: item["score"], reverse=True)[0]
+
+
+def occupied_addresses(fixtures):
+    occupied = set()
+    for fixture in fixtures:
+        address = int(fixture["node_address"])
+        count = int(fixture.get("element_count") or 1)
+        for offset in range(max(1, count)):
+            occupied.add(address + offset)
+    return occupied
+
+
+def choose_source_addresses(fixtures):
+    occupied = occupied_addresses(fixtures)
+    source = 3 if 3 not in occupied else next(candidate for candidate in range(4, 0x8000) if candidate not in occupied)
+    with_source = set(occupied)
+    with_source.add(source)
+    telink = 1 if 1 not in with_source else next(candidate for candidate in range(4, 0x8000) if candidate not in with_source)
+    return source, telink
+
+
+def write_json0600(path, payload, replace=False):
+    target = Path(path).expanduser().resolve()
+    if target.exists() and not replace:
+        fail(f"target state file already exists at {target}; pass --replace to overwrite it")
+    target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".sidus-import.", suffix=".json", dir=str(target.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+        os.chmod(target, 0o600)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return target
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Import Sidus Link mesh state from an iPad backup")
+    parser.add_argument("--backup", required=True)
+    parser.add_argument("--state-path", required=True)
+    parser.add_argument("--mesh", default="")
+    parser.add_argument("--replace", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+
+    raw_candidates = load_mesh_candidates(args.backup)
+    candidates = []
+    for domain, relative_path, data in raw_candidates:
+        candidate = candidate_from_mesh(domain, relative_path, data)
+        if candidate:
+            candidates.append(candidate)
+    selected = select_candidate(candidates, args.mesh)
+    source_address, telink_source_address = choose_source_addresses(selected["fixtures"])
+    imported_at = now_iso()
+    payload = {
+        "schema_version": 1,
+        "synced_at": imported_at,
+        "source": {
+            "type": "sidus_ios_backup_import",
+            "imported_at": imported_at,
+            "mesh_name": selected["mesh_name"],
+            "mesh_uuid": selected["mesh_uuid"],
+            "mesh_file": selected["relative_path"],
+        },
+        "mesh": {
+            "uuid": selected["mesh_uuid"],
+            "net_key": selected["net_key"],
+            "app_key": selected["app_key"],
+            "fixtures_ordered_list": "[]",
+            "scenes_ordered_list": "[]",
+            "update_time": imported_at,
+            "state": 0,
+        },
+        "fixtures": selected["fixtures"],
+        "runtime": {
+            "iv_index": 0,
+            "source_address": source_address,
+            "telink_source_address": telink_source_address,
+            "sequence_next": 1,
+            "updated_at": imported_at,
+            "last_reserved_by": "sidus-import",
+        },
+        "scenes": {},
+    }
+    target = write_json0600(args.state_path, payload, replace=args.replace)
+    data = {
+        "imported": True,
+        "target_path": display_path(str(target)),
+        "mesh_name": selected["mesh_name"],
+        "mesh_uuid": selected["mesh_uuid"],
+        "mesh_file": selected["relative_path"],
+        "fixture_count": len(selected["fixtures"]),
+        "fixtures": [safe_fixture(fixture) for fixture in selected["fixtures"]],
+        "control_only": any(fixture.get("control_only") for fixture in selected["fixtures"]),
+    }
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return
+    print(f"imported Sidus mesh {data['mesh_name'] or data['mesh_uuid']} with {data['fixture_count']} fixtures to {data['target_path']}")
+    for fixture in data["fixtures"]:
+        suffix = fixture.get("mac_suffix") or "unknown"
+        mode = "control-only" if fixture.get("control_only") else "full"
+        print(f"{fixture['name']}\t{fixture['address']}\t...{suffix}\t{mode}")
+
+
+if __name__ == "__main__":
+    main()

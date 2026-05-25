@@ -49,10 +49,22 @@ Useful commands:
 - `./bin/amaran config-node-reset-test --confirm-reset --json`
 - `./bin/amaran join-capture --output-state <capture.json> [--timeout <sec>]`
 - `./bin/amaran join-capture --output-state <capture.json> [--timeout <sec>] --json`
+- `./bin/amaran sidus-import --backup <path> [--mesh <selector>] [--replace]`
+- `./bin/amaran sidus-import --backup <path> [--mesh <selector>] [--replace] --json`
 - `./bin/amaran state-join <join-state.json>`
 - `./bin/amaran state-join <join-state.json> --json`
 - `./bin/amaran state-install <source-state.json>`
 - `./bin/amaran state-install <source-state.json> --json`
+- `./bin/amaran discover --range <start-end[,addr]> [--update-state]`
+- `./bin/amaran discover --range <start-end[,addr]> [--update-state] --json`
+- `./bin/amaran scene capture <name>`
+- `./bin/amaran scene capture <name> --json`
+- `./bin/amaran scene apply <name>`
+- `./bin/amaran scene apply <name> --json`
+- `./bin/amaran scene list`
+- `./bin/amaran scene list --json`
+- `./bin/amaran scene show <name>`
+- `./bin/amaran scene show <name> --json`
 - `./bin/amaran list`
 - `./bin/amaran probe`
 - `./bin/amaran status`
@@ -65,6 +77,10 @@ Implementation notes:
 
 - CLI state is a JSON studio manifest that lives in
   `~/Library/Application Support/amaran-cli/state.json`.
+- The preferred Sidus-owned studio workflow is: pair/organize fixtures in Sidus
+  Link Pro on the iPad, create an encrypted local iPad backup, run
+  `./bin/amaran sidus-import --backup <path>`, then use direct CLI runtime
+  commands and `scene` commands. This keeps the iPad as pairing source of truth.
 - `list`, `probe`, `status`, `on`, `off`, `intensity`, and `cct` are direct
   runtime commands. They require local CLI state and must not silently fall back
   to third-party app databases or helper bundles.
@@ -96,6 +112,13 @@ Implementation notes:
   to overwrite an existing target state file, validate key hex lengths and
   runtime counters, write `0600`, and print only redacted fixture
   summaries.
+- `./bin/amaran sidus-import --backup <path>` imports Sidus Link Pro mesh JSON
+  from an encrypted local iPad backup, an unencrypted backup, or an extracted
+  Sidus app container into normal CLI state. It must refuse to overwrite target
+  state unless `--replace` is passed, write `0600`, and print only redacted
+  fixture summaries. Encrypted backup import uses `iphone_backup_decrypt` and
+  prompts for the backup password unless `AMARAN_IOS_BACKUP_PASSWORD` is set.
+  It must not print NetKey, AppKey, DeviceKeys, or backup passwords.
 - `./bin/amaran state-join <join-state.json>` converts externally supplied
   NetKey/AppKey/fixture-address metadata into CLI state for runtime control of
   an existing mesh. It must refuse to overwrite target state, write `0600`, and
@@ -104,6 +127,18 @@ Implementation notes:
   control-only: `list`, `probe`, `status`, `on`, `off`, `intensity`, and `cct`
   can work, but Config diagnostics and node reset must fail before sending
   DeviceKey traffic for those fixtures.
+- `./bin/amaran discover --range <spec>` probes candidate fixture unicast
+  addresses on the current imported mesh using vendor status reads. It may
+  advance sequence counters. Without `--update-state`, it should remove
+  temporary candidate fixtures after probing; with `--update-state`, responsive
+  new addresses may remain as control-only fixtures. It cannot recover new
+  DeviceKeys, names, MACs, groups, or Sidus scenes; use a fresh Sidus backup
+  import for that metadata.
+- `./bin/amaran scene capture <name>` reads live vendor status from fixtures and
+  stores a local named scene in the top-level `scenes` object. `scene apply`
+  restores saved intensity/CCT/sleep state through direct runtime commands.
+  `scene list` and `scene show` are offline reads. Scene commands must not print
+  mesh/app/device keys.
 - `./bin/amaran join-capture --output-state <capture.json>` is experimental.
   It launches `BluetoothProbe.app` as a CoreBluetooth peripheral that advertises
   Mesh Provisioning service `0x1827` and behaves as a dummy no-OOB provisionee.
@@ -247,6 +282,25 @@ Development notes:
   metadata.
   Internal helper flag `--expect-segment-ack <SeqZero> <SegN>` waits for the
   matching acknowledgment and reports safe aggregate ack metadata.
+- For the nRF52840 DK Sidus join probe, use `scripts/read-dk-capture` to read
+  and decode the current `amaran_capture_state` block. It finds the symbol
+  address from the current Zephyr ELF and prints only redacted metadata. Raw
+  capture files may contain mesh keys if capture succeeds; keep them in
+  `/private/tmp` or another private location and never commit them.
+  `scripts/read-dk-capture --clear` writes the capture clear marker, resets the
+  DK, and verifies a clean capture header. Use it before a fresh Sidus attempt,
+  not after an attempt that may have captured keys. If a capture has both NetKey
+  and AppKey, `scripts/dk-capture-to-state-join --capture <capture.hex>
+  --output <join.json> --fixture <addr[=name]>` converts it into the
+  key-bearing `state-join` source format with `0600` permissions and redacted
+  output. The converter cannot infer real fixture unicast addresses from the DK
+  capture; pass each real fixture address explicitly.
+  `scripts/dk-sidus-attempt prepare|read|convert` wraps the same steps for the
+  human-in-the-loop Sidus trial. The current DK firmware raises ATT/L2CAP MTU
+  support so the 65-byte Provisioning Public Key response can be sent as one
+  `len=66 mtu=247` PB-GATT notification. This was added after Sidus reached
+  Invite, Start, and provisioner Public Key, then disconnected immediately after
+  the first 30-byte segmented DK Public Key notification.
 - If commands fail immediately with `central_state unauthorized`, macOS
   Bluetooth permission for `BluetoothProbe.app` likely needs to be re-enabled.
   Older ad-hoc builds used changing `cdhash` requirements, so an existing denied

@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def fail(message):
+    print(f"amaran: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def load_state(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        fail(f"local state not found at {path}")
+    except json.JSONDecodeError as exc:
+        fail(f"local state could not be read: invalid JSON at line {exc.lineno} column {exc.colno}")
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        fail("local state has unsupported schema")
+    if not isinstance(payload.get("fixtures"), list):
+        fail("local state is missing fixtures")
+    return payload
+
+
+def write_state(path, payload):
+    target = Path(path)
+    fd, tmp = tempfile.mkstemp(prefix=".scene-store.", suffix=".json", dir=str(target.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+        os.chmod(target, 0o600)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def mac_suffix(value):
+    return "".join(ch for ch in str(value or "") if ch in "0123456789abcdefABCDEF").upper()[-6:]
+
+
+def fixture_label(fixture):
+    if fixture.get("name"):
+        return str(fixture["name"])
+    suffix = mac_suffix(fixture.get("mac_address"))
+    code = fixture.get("code")
+    if code and suffix:
+        return f"{code}-{suffix}"
+    return suffix or f"fixture-{fixture.get('node_address', 'unknown')}"
+
+
+def scene_map(payload):
+    scenes = payload.get("scenes")
+    if not isinstance(scenes, dict):
+        scenes = {}
+        payload["scenes"] = scenes
+    return scenes
+
+
+def status_for(root, state_path, address):
+    command = [
+        str(Path(root) / "bin" / "amaran"),
+        "status",
+        "--json",
+        "--node",
+        str(address),
+        "--state-path",
+        str(state_path),
+    ]
+    return subprocess.run(command, text=True, capture_output=True)
+
+
+def control(root, state_path, entry):
+    address = str(entry["node_address"])
+    sleep_mode = entry.get("sleep_mode")
+    if sleep_mode == 0:
+        command = [str(Path(root) / "bin" / "amaran"), "off", "--node", address, "--state-path", str(state_path)]
+    else:
+        cct = entry.get("cct")
+        intensity = entry.get("intensity")
+        if cct is not None and intensity is not None:
+            command = [
+                str(Path(root) / "bin" / "amaran"),
+                "cct",
+                str(int(cct)),
+                "--intensity",
+                f"{float(intensity):g}",
+                "--node",
+                address,
+                "--state-path",
+                str(state_path),
+            ]
+        elif intensity is not None:
+            command = [
+                str(Path(root) / "bin" / "amaran"),
+                "intensity",
+                f"{float(intensity):g}",
+                "--node",
+                address,
+                "--state-path",
+                str(state_path),
+            ]
+        else:
+            command = [str(Path(root) / "bin" / "amaran"), "on", "--node", address, "--state-path", str(state_path)]
+    return subprocess.run(command, text=True, capture_output=True)
+
+
+def normalize_status(fixture, status):
+    cct = status.get("cct") or {}
+    intensity = cct.get("intensity")
+    if isinstance(intensity, (int, float)) and intensity > 100:
+        intensity = intensity / 10
+    return {
+        "node_address": fixture.get("node_address"),
+        "name": fixture_label(fixture),
+        "mac_suffix": mac_suffix(fixture.get("mac_address")),
+        "intensity": intensity,
+        "cct": cct.get("cct"),
+        "sleep_mode": cct.get("sleep_mode"),
+    }
+
+
+def scene_summary(name, scene):
+    fixtures = scene.get("fixtures") if isinstance(scene.get("fixtures"), list) else []
+    return {
+        "name": name,
+        "captured_at": scene.get("captured_at"),
+        "fixture_count": len(fixtures),
+        "fixtures": fixtures,
+    }
+
+
+def cmd_capture(args):
+    state_path = Path(args.state_path).expanduser().resolve()
+    payload = load_state(state_path)
+    fixtures = [fixture for fixture in payload.get("fixtures", []) if isinstance(fixture, dict)]
+    if not fixtures:
+        fail("local state has no fixtures")
+
+    captured = []
+    for fixture in fixtures:
+        address = fixture.get("node_address")
+        if not isinstance(address, int):
+            continue
+        result = status_for(args.root, state_path, address)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip().splitlines()[-1:] or ["status failed"]
+            fail(f"could not capture fixture {fixture_label(fixture)} at address {address}: {detail[0]}")
+        try:
+            status = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            fail(f"could not capture fixture {fixture_label(fixture)} at address {address}: invalid status JSON")
+        captured.append(normalize_status(fixture, status))
+
+    payload = load_state(state_path)
+    scenes = scene_map(payload)
+    scenes[args.name] = {
+        "captured_at": now_iso(),
+        "fixtures": captured,
+    }
+    write_state(state_path, payload)
+    output = scene_summary(args.name, scenes[args.name])
+    if args.json:
+        print(json.dumps(output, indent=2))
+    else:
+        print(f"captured scene {args.name!r} with {len(captured)} fixtures")
+
+
+def cmd_apply(args):
+    state_path = Path(args.state_path).expanduser().resolve()
+    payload = load_state(state_path)
+    scenes = scene_map(payload)
+    scene = scenes.get(args.name)
+    if not isinstance(scene, dict):
+        fail(f"scene not found: {args.name}")
+    applied = []
+    for entry in scene.get("fixtures") or []:
+        if not isinstance(entry, dict) or not isinstance(entry.get("node_address"), int):
+            continue
+        result = control(args.root, state_path, entry)
+        applied.append({
+            "address": entry.get("node_address"),
+            "name": entry.get("name") or f"fixture-{entry.get('node_address')}",
+            "ok": result.returncode == 0,
+        })
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip().splitlines()[-1:] or ["control failed"]
+            fail(f"could not apply scene fixture {entry.get('name') or entry.get('node_address')}: {detail[0]}")
+    output = {"name": args.name, "applied": len(applied), "fixtures": applied}
+    if args.json:
+        print(json.dumps(output, indent=2))
+    else:
+        print(f"applied scene {args.name!r} to {len(applied)} fixtures")
+
+
+def cmd_list(args):
+    payload = load_state(Path(args.state_path).expanduser().resolve())
+    scenes = scene_map(payload)
+    rows = [scene_summary(name, scene) for name, scene in sorted(scenes.items()) if isinstance(scene, dict)]
+    if args.json:
+        print(json.dumps({"scenes": rows}, indent=2))
+        return
+    if not rows:
+        print("No scenes saved.")
+        return
+    for row in rows:
+        print(f"{row['name']}\t{row['fixture_count']}\t{row.get('captured_at') or 'unknown'}")
+
+
+def cmd_show(args):
+    payload = load_state(Path(args.state_path).expanduser().resolve())
+    scenes = scene_map(payload)
+    scene = scenes.get(args.name)
+    if not isinstance(scene, dict):
+        fail(f"scene not found: {args.name}")
+    output = scene_summary(args.name, scene)
+    if args.json:
+        print(json.dumps(output, indent=2))
+        return
+    print(f"{args.name}\t{output['fixture_count']}\t{output.get('captured_at') or 'unknown'}")
+    for fixture in output["fixtures"]:
+        parts = [fixture.get("name") or f"fixture-{fixture.get('node_address')}", str(fixture.get("node_address"))]
+        if fixture.get("intensity") is not None:
+            parts.append(f"{fixture['intensity']:g}%")
+        if fixture.get("cct") is not None:
+            parts.append(f"{fixture['cct']}K")
+        print("\t".join(parts))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Capture and apply named amaran scenes")
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--state-path", required=True)
+    parser.add_argument("--json", action="store_true")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    capture = sub.add_parser("capture")
+    capture.add_argument("name")
+    capture.set_defaults(func=cmd_capture)
+
+    apply = sub.add_parser("apply")
+    apply.add_argument("name")
+    apply.set_defaults(func=cmd_apply)
+
+    list_cmd = sub.add_parser("list")
+    list_cmd.set_defaults(func=cmd_list)
+
+    show = sub.add_parser("show")
+    show.add_argument("name")
+    show.set_defaults(func=cmd_show)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

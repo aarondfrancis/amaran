@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def fail(message):
+    print(f"amaran: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_range(spec):
+    if not spec:
+        fail("discover requires --range <start-end>")
+    addresses = []
+    try:
+        for part in spec.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                start_text, end_text = part.split("-", 1)
+                start = int(start_text, 0)
+                end = int(end_text, 0)
+                if start > end:
+                    fail("discover has invalid --range")
+                addresses.extend(range(start, end + 1))
+            else:
+                addresses.append(int(part, 0))
+    except ValueError:
+        fail("discover has invalid --range")
+    if not addresses:
+        fail("discover has invalid --range")
+    unique = []
+    seen = set()
+    for address in addresses:
+        if not 1 <= address <= 0x7FFF:
+            fail("discover --range contains a non-unicast address")
+        if address not in seen:
+            unique.append(address)
+            seen.add(address)
+    return unique
+
+
+def load_state(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        fail(f"local state not found at {path}")
+    except json.JSONDecodeError as exc:
+        fail(f"local state could not be read: invalid JSON at line {exc.lineno} column {exc.colno}")
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        fail("local state has unsupported schema")
+    if not isinstance(payload.get("mesh"), dict) or not isinstance(payload.get("fixtures"), list):
+        fail("local state is missing mesh or fixture data")
+    return payload
+
+
+def write_state(path, payload):
+    target = Path(path)
+    fd, tmp = tempfile.mkstemp(prefix=".discover-existing-mesh.", suffix=".json", dir=str(target.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+        os.chmod(target, 0o600)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def mac_suffix(value):
+    return "".join(ch for ch in str(value or "") if ch in "0123456789abcdefABCDEF").upper()[-6:]
+
+
+def fixture_label(fixture):
+    if fixture.get("name"):
+        return str(fixture["name"])
+    suffix = mac_suffix(fixture.get("mac_address"))
+    code = fixture.get("code")
+    if code and suffix:
+        return f"{code}-{suffix}"
+    return suffix or f"fixture-{fixture.get('node_address', 'unknown')}"
+
+
+def ensure_fixture(payload, address):
+    for fixture in payload["fixtures"]:
+        if isinstance(fixture, dict) and fixture.get("node_address") == address:
+            return False
+    payload["fixtures"].append({
+        "uuid": f"discovered-{address}",
+        "mac_address": "",
+        "code": "",
+        "name": f"fixture-{address}",
+        "node_address": address,
+        "composition_data": "",
+        "element_count": 1,
+        "update_time": now_iso(),
+        "state": 0,
+        "control_only": True,
+    })
+    return True
+
+
+def remove_fixture(payload, address):
+    payload["fixtures"] = [
+        fixture for fixture in payload.get("fixtures", [])
+        if not (isinstance(fixture, dict) and fixture.get("node_address") == address)
+    ]
+
+
+def status_for(root, state_path, address):
+    command = [
+        str(Path(root) / "bin" / "amaran"),
+        "status",
+        "--json",
+        "--node",
+        str(address),
+        "--state-path",
+        str(state_path),
+    ]
+    return subprocess.run(command, text=True, capture_output=True)
+
+
+def normalize_status(address, fixture, raw_status):
+    cct = raw_status.get("cct") or {}
+    intensity = cct.get("intensity")
+    if isinstance(intensity, (int, float)) and intensity > 100:
+        intensity = intensity / 10
+    return {
+        "address": address,
+        "name": fixture_label(fixture),
+        "mac_suffix": mac_suffix(fixture.get("mac_address")),
+        "intensity": intensity,
+        "cct": cct.get("cct"),
+        "sleep_mode": cct.get("sleep_mode"),
+        "control_only": bool(fixture.get("control_only")),
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Discover control-capable fixtures already on a known mesh")
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--state-path", required=True)
+    parser.add_argument("--range", required=True)
+    parser.add_argument("--update-state", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+
+    state_path = Path(args.state_path).expanduser().resolve()
+    addresses = parse_range(args.range)
+    payload = load_state(state_path)
+    runtime = payload.get("runtime") or {}
+    reserved = {runtime.get("source_address"), runtime.get("telink_source_address")}
+
+    found = []
+    misses = []
+    for address in addresses:
+        if address in reserved:
+            misses.append({"address": address, "reason": "reserved-source-address"})
+            continue
+
+        payload = load_state(state_path)
+        added = ensure_fixture(payload, address)
+        write_state(state_path, payload)
+
+        result = status_for(args.root, state_path, address)
+        latest = load_state(state_path)
+        fixture = next(
+            (item for item in latest.get("fixtures", []) if isinstance(item, dict) and item.get("node_address") == address),
+            {"node_address": address, "name": f"fixture-{address}"},
+        )
+        if result.returncode == 0:
+            try:
+                raw_status = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                raw_status = {}
+            found.append(normalize_status(address, fixture, raw_status))
+            if added and not args.update_state:
+                remove_fixture(latest, address)
+                write_state(state_path, latest)
+        else:
+            misses.append({"address": address, "reason": "no-status"})
+            if added:
+                remove_fixture(latest, address)
+                write_state(state_path, latest)
+
+    output = {
+        "discovered": len(found),
+        "range": args.range,
+        "updated_state": bool(args.update_state),
+        "fixtures": found,
+        "misses": misses,
+    }
+    if args.json:
+        print(json.dumps(output, indent=2))
+        return
+
+    print(f"discovered {len(found)} fixtures in range {args.range}")
+    for fixture in found:
+        suffix = fixture.get("mac_suffix") or "unknown"
+        parts = [fixture["name"], str(fixture["address"]), f"...{suffix}"]
+        if fixture.get("intensity") is not None:
+            parts.append(f"{fixture['intensity']:g}%")
+        if fixture.get("cct") is not None:
+            parts.append(f"{fixture['cct']}K")
+        print("\t".join(parts))
+    if not args.update_state:
+        print("state fixtures unchanged; sequence counters may be advanced")
+
+
+if __name__ == "__main__":
+    main()
