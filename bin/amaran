@@ -147,6 +147,13 @@ Environment:
   AMARAN_NODE_ID               Default --node.
   AMARAN_TIMEOUT               Default --timeout.
   AMARAN_ATTENTION_DURATION    Default --attention.
+  AMARAN_IOS_BACKUP_PASSWORD   Optional password source for encrypted local
+                               iPad backups. Prefer the interactive prompt
+                               when possible.
+  AMARAN_IOS_BACKUP_IMPORT_VENV
+                               Optional venv path for the encrypted backup
+                               importer dependency. Defaults under
+                               ~/Library/Application Support/amaran-cli.
 
 Sidus-first studio workflow:
   1. Pair and organize fixtures in Sidus Link Pro on the iPad.

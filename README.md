@@ -106,10 +106,13 @@ and fixture setup:
 
 `sidus-import` accepts either an iPad backup directory or an extracted Sidus app
 container. Encrypted backups require the Python package
-`iphone_backup_decrypt`; the command prompts for the backup password unless
-`AMARAN_IOS_BACKUP_PASSWORD` is set. It writes the normal CLI state file with
-`0600` permissions, refuses to overwrite existing state unless `--replace` is
-passed, and prints only redacted fixture summaries.
+`iphone_backup_decrypt`; if it is missing, the importer creates a private venv
+under `~/Library/Application Support/amaran-cli/python/ios-backup-import` and
+installs it there. Set `AMARAN_IOS_BACKUP_IMPORT_VENV` to override that path.
+The command prompts for the backup password unless `AMARAN_IOS_BACKUP_PASSWORD`
+is set. It writes the normal CLI state file with `0600` permissions, refuses to
+overwrite existing state unless `--replace` is passed, and prints only redacted
+fixture summaries.
 
 If you add fixtures in Sidus Link Pro and the mesh keys did not change, the CLI
 can scan candidate unicast addresses and optionally keep responsive fixtures:

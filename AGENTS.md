@@ -118,7 +118,10 @@ Implementation notes:
   state unless `--replace` is passed, write `0600`, and print only redacted
   fixture summaries. Encrypted backup import uses `iphone_backup_decrypt` and
   prompts for the backup password unless `AMARAN_IOS_BACKUP_PASSWORD` is set.
-  It must not print NetKey, AppKey, DeviceKeys, or backup passwords.
+  If that package is missing, the importer may create a private venv under
+  `~/Library/Application Support/amaran-cli/python/ios-backup-import`; set
+  `AMARAN_IOS_BACKUP_IMPORT_VENV` to override that path for tests. It must not
+  print NetKey, AppKey, DeviceKeys, or backup passwords.
 - `./bin/amaran state-join <join-state.json>` converts externally supplied
   NetKey/AppKey/fixture-address metadata into CLI state for runtime control of
   an existing mesh. It must refuse to overwrite target state, write `0600`, and

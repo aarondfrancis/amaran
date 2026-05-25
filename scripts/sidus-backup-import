@@ -4,6 +4,7 @@ import getpass
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -14,6 +15,8 @@ APP_DOMAINS = (
     "AppDomain-com.aputure.cn.SidusLink",
     "AppDomain-com.siduslink.cn.Acrux.hd",
 )
+IPHONE_BACKUP_PACKAGE = "iphone-backup-decrypt>=0.9,<1"
+BOOTSTRAP_ENV = "AMARAN_IOS_BACKUP_DEPS_BOOTSTRAPPED"
 
 
 def fail(message):
@@ -96,6 +99,58 @@ def display_path(path):
     return absolute
 
 
+def encrypted_import_venv():
+    configured = os.environ.get("AMARAN_IOS_BACKUP_IMPORT_VENV")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / "Library" / "Application Support" / "amaran-cli" / "python" / "ios-backup-import"
+
+
+def ensure_encrypted_import_dependency():
+    try:
+        from iphone_backup_decrypt import EncryptedBackup
+        return EncryptedBackup
+    except ImportError:
+        pass
+
+    if os.environ.get(BOOTSTRAP_ENV) == "1":
+        fail(
+            "encrypted iPad backup import requires Python package iphone_backup_decrypt; "
+            "automatic installation did not make it importable"
+        )
+
+    venv_dir = encrypted_import_venv()
+    python_path = venv_dir / "bin" / "python"
+    try:
+        venv_dir.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        if not python_path.exists():
+            print(f"amaran: preparing encrypted backup importer at {display_path(str(venv_dir))}", file=sys.stderr)
+            subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
+        print("amaran: installing encrypted backup import dependency", file=sys.stderr)
+        subprocess.run(
+            [
+                str(python_path),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-cache-dir",
+                "-q",
+                IPHONE_BACKUP_PACKAGE,
+            ],
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        fail(f"encrypted backup import dependency setup failed with exit code {exc.returncode}")
+    except OSError as exc:
+        fail(f"encrypted backup import dependency setup failed: {exc}")
+
+    env = dict(os.environ)
+    env[BOOTSTRAP_ENV] = "1"
+    os.execve(str(python_path), [str(python_path), str(Path(__file__).resolve()), *sys.argv[1:]], env)
+    raise AssertionError("unreachable")
+
+
 def find_backup_dir(path):
     root = Path(path).expanduser().resolve()
     if not root.exists():
@@ -152,39 +207,36 @@ def unencrypted_backup_mesh_files(backup_dir):
 
 
 def encrypted_backup_mesh_files(backup_dir):
-    try:
-        from iphone_backup_decrypt import EncryptedBackup
-    except ImportError:
-        fail(
-            "encrypted iPad backup import requires Python package iphone_backup_decrypt; "
-            "install it in the Python used by ./bin/amaran"
-        )
+    EncryptedBackup = ensure_encrypted_import_dependency()
 
     password = os.environ.get("AMARAN_IOS_BACKUP_PASSWORD")
     if not password:
         password = getpass.getpass("iPad backup password: ")
 
-    backup = EncryptedBackup(backup_directory=str(backup_dir), passphrase=password)
-    backup.test_decryption()
     rows = []
-    with backup.manifest_db_cursor() as cur:
-        cur.execute(
-            """
-            select domain, relativePath
-            from Files
-            where flags = 1
-              and domain in (?, ?)
-              and relativePath like 'Documents/mesh/%.json'
-            order by domain, relativePath
-            """,
-            APP_DOMAINS,
-        )
-        for domain, relative_path in cur.fetchall():
-            try:
-                data = backup.extract_file_as_bytes(relative_path, domain_like=domain)
-            except Exception:
-                continue
-            rows.append((domain, relative_path, data))
+    try:
+        backup = EncryptedBackup(backup_directory=str(backup_dir), passphrase=password)
+        backup.test_decryption()
+        with backup.manifest_db_cursor() as cur:
+            cur.execute(
+                """
+                select domain, relativePath
+                from Files
+                where flags = 1
+                  and domain in (?, ?)
+                  and relativePath like 'Documents/mesh/%.json'
+                order by domain, relativePath
+                """,
+                APP_DOMAINS,
+            )
+            for domain, relative_path in cur.fetchall():
+                try:
+                    data = backup.extract_file_as_bytes(relative_path, domain_like=domain)
+                except Exception:
+                    continue
+                rows.append((domain, relative_path, data))
+    except Exception as exc:
+        fail(f"encrypted iPad backup could not be read: {exc}")
     return rows
 
 
@@ -402,9 +454,6 @@ def main():
     data = {
         "imported": True,
         "target_path": display_path(str(target)),
-        "mesh_name": selected["mesh_name"],
-        "mesh_uuid": selected["mesh_uuid"],
-        "mesh_file": selected["relative_path"],
         "fixture_count": len(selected["fixtures"]),
         "fixtures": [safe_fixture(fixture) for fixture in selected["fixtures"]],
         "control_only": any(fixture.get("control_only") for fixture in selected["fixtures"]),
@@ -412,7 +461,8 @@ def main():
     if args.json:
         print(json.dumps(data, indent=2))
         return
-    print(f"imported Sidus mesh {data['mesh_name'] or data['mesh_uuid']} with {data['fixture_count']} fixtures to {data['target_path']}")
+    fixture_word = "fixture" if data["fixture_count"] == 1 else "fixtures"
+    print(f"imported Sidus mesh with {data['fixture_count']} {fixture_word} to {data['target_path']}")
     for fixture in data["fixtures"]:
         suffix = fixture.get("mac_suffix") or "unknown"
         mode = "control-only" if fixture.get("control_only") else "full"

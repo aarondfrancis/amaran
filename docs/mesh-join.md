@@ -47,10 +47,13 @@ NetKey, AppKey, fixture unicast addresses, and any available DeviceKeys, then
 writes the normal CLI state file with `0600` permissions. Terminal output is
 redacted: counts, names, addresses, and MAC suffixes only.
 
-Encrypted backups require the Python package `iphone_backup_decrypt`. The
-command prompts for the backup password unless `AMARAN_IOS_BACKUP_PASSWORD` is
-set in the environment. Do not paste backup passwords or generated state files
-into issues, logs, or commits.
+Encrypted backups require the Python package `iphone_backup_decrypt`. If it is
+missing, the importer creates a private venv under
+`~/Library/Application Support/amaran-cli/python/ios-backup-import` and installs
+the dependency there. Set `AMARAN_IOS_BACKUP_IMPORT_VENV` to override that path.
+The command prompts for the backup password unless `AMARAN_IOS_BACKUP_PASSWORD`
+is set in the environment. Do not paste backup passwords or generated state
+files into issues, logs, or commits.
 
 Use `--mesh <selector>` when a backup contains multiple mesh files. The selector
 matches mesh name, mesh UUID, or mesh file path substring. Use `--replace` only
