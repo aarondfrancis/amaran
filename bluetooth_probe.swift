@@ -221,6 +221,9 @@ struct NativeJoinCaptureRun {
 }
 
 func fixtureLabel(_ fixture: [String: Any]) -> String {
+    if let friendlyName = jsonString(fixture["friendly_name"]) {
+        return friendlyName
+    }
     if let name = jsonString(fixture["name"]) {
         return name
     }
@@ -242,7 +245,9 @@ func fixtureMacSuffix(_ fixture: [String: Any]) -> String? {
 func selectFixture(_ fixtures: [[String: Any]], nodeID: String?) throws -> [String: Any] {
     if let nodeID, !nodeID.isEmpty {
         if let fixture = fixtures.first(where: { fixture in
-            jsonString(fixture["node_address"]) == nodeID || jsonString(fixture["name"]) == nodeID
+            jsonString(fixture["node_address"]) == nodeID ||
+                jsonString(fixture["friendly_name"]) == nodeID ||
+                jsonString(fixture["name"]) == nodeID
         }) {
             return fixture
         }

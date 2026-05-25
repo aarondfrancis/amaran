@@ -47,8 +47,10 @@ assert_contains "$HELP_OUTPUT" "amaran pair-test [--add] [--attention <0-255>] [
 assert_contains "$HELP_OUTPUT" "amaran sidus-import --backup <path>" "help sidus-import usage"
 assert_contains "$HELP_OUTPUT" "amaran state-join <join-state.json> [--json]" "help state-join usage"
 assert_contains "$HELP_OUTPUT" "amaran discover --range <start-end" "help discover usage"
-assert_contains "$HELP_OUTPUT" "amaran scene capture <name> [--node <id>]" "help scene capture usage"
-assert_contains "$HELP_OUTPUT" "amaran scene apply <name> [--node <id>]" "help scene apply usage"
+assert_contains "$HELP_OUTPUT" "amaran fixture rename <node> <friendly-name> [--json]" "help fixture rename usage"
+assert_contains "$HELP_OUTPUT" "amaran scene capture <name> [--node <id|name>]" "help scene capture usage"
+assert_contains "$HELP_OUTPUT" "amaran scene apply <name> [--node <id|name>]" "help scene apply usage"
+assert_contains "$HELP_OUTPUT" "amaran identify [<id|name>] [--node <id|name>] [--json]" "help identify usage"
 assert_contains "$HELP_OUTPUT" "config-node-reset-test [--dry-run|--confirm-reset]" "help node reset usage"
 assert_contains "$HELP_OUTPUT" "--state-path <p>" "help state path option"
 assert_contains "$HELP_OUTPUT" "--backup <path>" "help backup option"
@@ -117,6 +119,12 @@ if "$ROOT/bin/amaran" status --update-state >"$INVALID_UPDATE_STATE_OUTPUT" 2>&1
   fail "status --update-state should fail"
 fi
 assert_contains "$(cat "$INVALID_UPDATE_STATE_OUTPUT")" "--update-state is only supported for discover" "invalid update-state guard"
+
+IDENTIFY_MISSING_STATE_OUTPUT="$TMPDIR/identify-missing-state.out"
+if "$ROOT/bin/amaran" identify --state-path "$TMPDIR/missing-identify-state.json" >"$IDENTIFY_MISSING_STATE_OUTPUT" 2>&1; then
+  fail "identify should require local state"
+fi
+assert_contains "$(cat "$IDENTIFY_MISSING_STATE_OUTPUT")" "identify requires local state" "identify missing state guard"
 
 NODE_RESET_CONFIRM_OUTPUT="$TMPDIR/node-reset-confirm.out"
 if "$ROOT/bin/amaran" config-node-reset-test --state-path "$TMPDIR/missing-state.json" >"$NODE_RESET_CONFIRM_OUTPUT" 2>&1; then
@@ -215,6 +223,24 @@ cat > "$STATE_WITH_SECRETS" <<JSON
   }
 }
 JSON
+
+FRIENDLY_STATE="$TMPDIR/friendly-state.json"
+cp "$STATE_WITH_SECRETS" "$FRIENDLY_STATE"
+FIXTURE_RENAME_OUTPUT="$("$ROOT/bin/amaran" fixture rename 2 desk-key --state-path "$FRIENDLY_STATE")"
+assert_contains "$FIXTURE_RENAME_OUTPUT" "renamed fixture 2 to desk-key" "fixture rename output"
+FIXTURE_LIST_OUTPUT="$("$ROOT/bin/amaran" list --state-path "$FRIENDLY_STATE")"
+assert_contains "$FIXTURE_LIST_OUTPUT" "desk-key" "fixture rename list display"
+assert_not_contains "$FIXTURE_LIST_OUTPUT" "$DEVICE_KEY_SENTINEL" "fixture list redaction after rename"
+FIXTURE_RENAME_JSON="$("$ROOT/bin/amaran" fixture rename desk-key tube-left --json --state-path "$FRIENDLY_STATE")"
+assert_contains "$FIXTURE_RENAME_JSON" '"friendly_name": "tube-left"' "fixture rename json"
+assert_contains "$FIXTURE_RENAME_JSON" '"source_name": "redaction-test"' "fixture rename source name json"
+assert_not_contains "$FIXTURE_RENAME_JSON" "$DEVICE_KEY_SENTINEL" "fixture rename json redaction"
+NODE_RESET_DRY_RUN_BY_NAME_OUTPUT="$("$ROOT/bin/amaran" config-node-reset-test --dry-run --node tube-left --state-path "$FRIENDLY_STATE")"
+assert_contains "$NODE_RESET_DRY_RUN_BY_NAME_OUTPUT" "fixture tube-left" "node reset dry-run friendly selector"
+FIXTURE_CLEAR_OUTPUT="$("$ROOT/bin/amaran" fixture clear-name tube-left --state-path "$FRIENDLY_STATE")"
+assert_contains "$FIXTURE_CLEAR_OUTPUT" "cleared friendly name tube-left" "fixture clear-name output"
+FIXTURE_CLEAR_LIST_OUTPUT="$("$ROOT/bin/amaran" list --state-path "$FRIENDLY_STATE")"
+assert_contains "$FIXTURE_CLEAR_LIST_OUTPUT" "redaction-test" "fixture clear-name restores source name display"
 
 FAKE_SIDUS_BACKUP="$TMPDIR/fake-sidus-extract"
 mkdir -p "$FAKE_SIDUS_BACKUP/AppDomain-com.siduslink.cn.Acrux.hd/Documents/mesh"

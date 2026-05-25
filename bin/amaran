@@ -36,17 +36,20 @@ Usage:
   amaran state-join <join-state.json> [--json]
   amaran state-install <source-state.json> [--json]
   amaran discover --range <start-end[,addr]> [--update-state] [--json]
-  amaran scene capture <name> [--node <id>] [--json]
-  amaran scene apply <name> [--node <id>] [--json]
+  amaran fixture rename <node> <friendly-name> [--json]
+  amaran fixture clear-name <node> [--json]
+  amaran scene capture <name> [--node <id|name>] [--json]
+  amaran scene apply <name> [--node <id|name>] [--json]
   amaran scene list [--json]
   amaran scene show <name> [--json]
   amaran list [--json]
-  amaran probe [--node <id>] [--json]
-  amaran status [--node <id>] [--json]
-  amaran on [--node <id>]
-  amaran off [--node <id>]
-  amaran intensity <0-100> [--node <id>]
-  amaran cct <kelvin> [--intensity <0-100>] [--node <id>]
+  amaran probe [--node <id|name>] [--json]
+  amaran status [--node <id|name>] [--json]
+  amaran identify [<id|name>] [--node <id|name>] [--json]
+  amaran on [--node <id|name>]
+  amaran off [--node <id|name>]
+  amaran intensity <0-100> [--node <id|name>]
+  amaran cct <kelvin> [--intensity <0-100>] [--node <id|name>]
 
 Diagnostics:
   amaran gatt-probe [--all-services] [--read-values] [--json]
@@ -55,19 +58,19 @@ Diagnostics:
   amaran provision-test [--add] [--attention <0-255>] [--json]
   amaran pair-test [--add] [--attention <0-255>] [--dry-run] [--verify] [--json]
   amaran proxy-test [--json]
-  amaran sig-onoff-test <on|off> [--node <id>] [--json]
-  amaran control-test <on|off|intensity|cct> [value] [--intensity <0-100>] [--node <id>] [--json]
-  amaran status-test [--node <id>] [--json]
-  amaran configure-test [--node <id>] [--json]
-  amaran config-composition-get-test [--node <id>] [--json]
-  amaran config-appkey-get-test [--node <id>] [--json]
-  amaran config-appkey-add-test [--node <id>] [--json]
-  amaran config-model-app-bind-test [--node <id>] [--json]
-  amaran config-node-reset-test [--dry-run|--confirm-reset] [--node <id>] [--json]
+  amaran sig-onoff-test <on|off> [--node <id|name>] [--json]
+  amaran control-test <on|off|intensity|cct> [value] [--intensity <0-100>] [--node <id|name>] [--json]
+  amaran status-test [--node <id|name>] [--json]
+  amaran configure-test [--node <id|name>] [--json]
+  amaran config-composition-get-test [--node <id|name>] [--json]
+  amaran config-appkey-get-test [--node <id|name>] [--json]
+  amaran config-appkey-add-test [--node <id|name>] [--json]
+  amaran config-model-app-bind-test [--node <id|name>] [--json]
+  amaran config-node-reset-test [--dry-run|--confirm-reset] [--node <id|name>] [--json]
 
 Options:
-  --node <id>        Fixture node address. Defaults to AMARAN_NODE_ID, then the
-                     only fixture in local state.
+  --node <id|name>   Fixture node address or friendly name. Defaults to
+                     AMARAN_NODE_ID, then the only fixture in local state.
   --timeout <sec>    BLE helper timeout. Defaults to AMARAN_TIMEOUT or 20.
   --attention <sec>  Provisioning Invite attention duration, 0-255 seconds.
                      Defaults to AMARAN_ATTENTION_DURATION or 0.
@@ -100,6 +103,7 @@ Stable runtime commands:
   list       Read redacted fixture summaries from local state.
   probe      Connect to the matching Mesh Proxy advertisement.
   status     Read the vendor CCT status packet.
+  identify   Blink the selected fixture three times, then restore state.
   on/off     Send Telink vendor on/off.
   intensity  Send Telink brightness, 0-100 percent.
   cct        Send Telink CCT in Kelvin. Without --intensity, reads status first
@@ -122,6 +126,8 @@ State and pairing:
   state-install  Validate and install a state file with 0600 permissions.
   discover       Probe addresses in the current mesh and optionally add
                  responsive control-only fixtures to local state.
+  fixture        Rename or clear local fixture-friendly names. Names are stored
+                 in CLI state and do not change Sidus Link Pro metadata.
   scene          Capture, list, show, and apply named fixture states. Capturing
                  reads live status; applying sends direct runtime commands.
 
@@ -183,9 +189,9 @@ Pairing a new fixture:
   3. For each additional fixture, append it to the same studio state:
        ./bin/amaran pair --add --dry-run
        ./bin/amaran pair --add --verify
-  4. With multiple fixtures, pass --node <address> or set AMARAN_NODE_ID for
-     runtime commands:
-       ./bin/amaran intensity 18 --node 18
+  4. With multiple fixtures, pass --node <address-or-name> or set
+     AMARAN_NODE_ID for runtime commands:
+       ./bin/amaran intensity 18 --node desk-key
 
   pair without --add refuses to overwrite an existing state file. pair --add
   reuses the existing mesh and appends one newly provisioned fixture; it does
@@ -197,6 +203,7 @@ Examples:
   ./bin/amaran sidus-import --backup /private/tmp/Backup
   ./bin/amaran state-join /tmp/sidus-join.json
   ./bin/amaran discover --range 2-64 --update-state
+  ./bin/amaran fixture rename 6 desk-key
   ./bin/amaran scene capture "recording scene" --node <address-from-list>
   ./bin/amaran scene apply "recording scene" --node <address-from-list>
   ./bin/amaran pair --dry-run --state-path /tmp/amaran-state.json
@@ -204,6 +211,7 @@ Examples:
   ./bin/amaran pair --add --verify
   ./bin/amaran list --json
   ./bin/amaran status
+  ./bin/amaran identify --node desk-key
   ./bin/amaran intensity 18
   ./bin/amaran cct 5600 --intensity 18
 
@@ -464,9 +472,9 @@ capture_native_json() {
     print -r -- "$captured"
     return 0
   fi
-  local status=$?
+  local command_status=$?
   JSON="$saved_json"
-  return "$status"
+  return "$command_status"
 }
 
 native_json_has_appkey_index() {
@@ -565,6 +573,8 @@ def mac_suffix(value):
     return normalized[-6:] if normalized else ""
 
 def fixture_label(fixture):
+    if fixture.get("friendly_name"):
+        return str(fixture["friendly_name"])
     if fixture.get("name"):
         return str(fixture["name"])
     code = fixture.get("code")
@@ -812,6 +822,8 @@ def mac_display(value):
     return "unknown"
 
 def fixture_name(fixture):
+    if fixture.get("friendly_name"):
+        return str(fixture["friendly_name"])
     if fixture.get("name"):
         return str(fixture["name"])
     code = fixture.get("code")
@@ -825,6 +837,8 @@ def fixture_name(fixture):
 safe = [
     {
         "name": fixture_name(fixture),
+        "friendly_name": fixture.get("friendly_name") or None,
+        "source_name": fixture.get("name") or None,
         "address": fixture.get("node_address"),
         "mac": mac_display(fixture.get("mac_address")),
     }
@@ -839,6 +853,181 @@ else:
         print("No fixtures found.")
     for fixture in safe:
         print(f"{fixture['name']}\t{fixture['address']}\t{fixture['mac']}")
+PY
+}
+
+run_fixture_command() {
+  if [[ ! -s "$STATE_PATH" ]]; then
+    echo "amaran: fixture requires local state at $STATE_PATH" >&2
+    return 1
+  fi
+  [[ ${#POSITIONALS[@]} -ge 1 ]] || { echo "amaran: fixture requires rename or clear-name" >&2; exit 1; }
+
+  /usr/bin/python3 - "$JSON" "$STATE_PATH" "${POSITIONALS[@]}" <<'PY'
+import json
+import os
+import re
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+raw_json = sys.argv[1] == "1"
+state_path = Path(os.path.expanduser(sys.argv[2]))
+args = sys.argv[3:]
+
+def fail(message):
+    print(f"amaran: {message}", file=sys.stderr)
+    sys.exit(1)
+
+def now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+def load_state(path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except FileNotFoundError:
+        fail(f"local state not found at {path}")
+    except json.JSONDecodeError as exc:
+        fail(f"local state could not be read: invalid JSON at line {exc.lineno} column {exc.colno}")
+    except Exception as exc:
+        fail(f"local state could not be read ({exc})")
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        fail("local state has unsupported schema")
+    if not isinstance(payload.get("fixtures"), list):
+        fail("local state is missing fixtures")
+    return payload
+
+def write_state(path, payload):
+    fd, tmp = tempfile.mkstemp(prefix=".fixture-name.", suffix=".json", dir=str(path.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+def normalized_mac(value):
+    return "".join(ch for ch in str(value or "") if ch in "0123456789abcdefABCDEF").upper()
+
+def fixture_display_name(fixture):
+    if fixture.get("friendly_name"):
+        return str(fixture["friendly_name"])
+    if fixture.get("name"):
+        return str(fixture["name"])
+    code = fixture.get("code")
+    suffix = normalized_mac(fixture.get("mac_address"))[-6:]
+    if code and suffix:
+        return f"{code}-{suffix}"
+    if suffix:
+        return suffix
+    return f"fixture-{fixture.get('node_address', 'unknown')}"
+
+def selector_values(fixture):
+    values = []
+    address = fixture.get("node_address")
+    if isinstance(address, int):
+        values.append(str(address))
+        values.append(hex(address))
+    for key in ("friendly_name", "name"):
+        value = fixture.get(key)
+        if isinstance(value, str) and value:
+            values.append(value)
+    return values
+
+def select_fixture(fixtures, selector):
+    selector_text = str(selector)
+    matches = [
+        fixture for fixture in fixtures
+        if any(value == selector_text for value in selector_values(fixture))
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        fail(f"fixture selector is ambiguous: {selector_text}")
+    fail(f"fixture not found: {selector_text}")
+
+def validate_friendly_name(fixtures, target, name):
+    if not isinstance(name, str):
+        fail("friendly name must be a string")
+    name = name.strip()
+    if not name:
+        fail("friendly name cannot be empty")
+    if len(name) > 64:
+        fail("friendly name must be 64 characters or fewer")
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$", name):
+        fail("friendly name may contain only letters, numbers, dot, underscore, colon, and hyphen")
+    try:
+        int(name, 0)
+        fail("friendly name cannot look like a numeric node address")
+    except ValueError:
+        pass
+    for fixture in fixtures:
+        if fixture is target:
+            continue
+        if any(value == name for value in selector_values(fixture)):
+            fail(f"friendly name conflicts with existing fixture selector: {name}")
+    return name
+
+def safe_fixture(fixture):
+    mac = normalized_mac(fixture.get("mac_address"))
+    mac_display = ":".join(mac[index:index + 2] for index in range(0, 12, 2)) if len(mac) == 12 else "unknown"
+    return {
+        "name": fixture_display_name(fixture),
+        "friendly_name": fixture.get("friendly_name") or None,
+        "source_name": fixture.get("name") or None,
+        "address": fixture.get("node_address"),
+        "mac": mac_display,
+    }
+
+if not args or args[0] in ("help", "-h", "--help"):
+    fail("fixture requires rename <node> <friendly-name> or clear-name <node>")
+
+action = args[0]
+payload = load_state(state_path)
+fixtures = [fixture for fixture in payload.get("fixtures", []) if isinstance(fixture, dict)]
+
+if action == "rename":
+    if len(args) != 3:
+        fail("fixture rename requires <node> <friendly-name>")
+    fixture = select_fixture(fixtures, args[1])
+    name = validate_friendly_name(fixtures, fixture, args[2])
+    previous = fixture.get("friendly_name")
+    fixture["friendly_name"] = name
+    fixture["updated_at"] = now_iso()
+    write_state(state_path, payload)
+    output = {"renamed": True, "previous_friendly_name": previous or None, "fixture": safe_fixture(fixture)}
+    if raw_json:
+        print(json.dumps(output, indent=2))
+    else:
+        print(f"renamed fixture {fixture.get('node_address')} to {name}")
+elif action == "clear-name":
+    if len(args) != 2:
+        fail("fixture clear-name requires <node>")
+    fixture = select_fixture(fixtures, args[1])
+    previous = fixture.pop("friendly_name", None)
+    fixture["updated_at"] = now_iso()
+    write_state(state_path, payload)
+    output = {"cleared": bool(previous), "previous_friendly_name": previous or None, "fixture": safe_fixture(fixture)}
+    if raw_json:
+        print(json.dumps(output, indent=2))
+    else:
+        if previous:
+            print(f"cleared friendly name {previous} from fixture {fixture.get('node_address')}")
+        else:
+            print(f"fixture {fixture.get('node_address')} had no friendly name")
+else:
+    fail("fixture requires rename or clear-name")
 PY
 }
 
@@ -918,6 +1107,8 @@ def mac_suffix(value):
     return "".join(ch for ch in str(value or "") if ch in "0123456789abcdefABCDEF").upper()[-6:]
 
 def fixture_label(fixture):
+    if fixture.get("friendly_name"):
+        return str(fixture["friendly_name"])
     if fixture.get("name"):
         return str(fixture["name"])
     code = fixture.get("code")
@@ -1149,6 +1340,8 @@ def mac_suffix(value):
     return normalized[-6:] if normalized else ""
 
 def fixture_label(fixture):
+    if fixture.get("friendly_name"):
+        return str(fixture["friendly_name"])
     if fixture.get("name"):
         return str(fixture["name"])
     code = fixture.get("code")
@@ -2437,6 +2630,7 @@ status = {
         "gm": cct.get("gm_decoded"),
         "cct": cct.get("cct_kelvin"),
         "intensity": cct.get("intensity"),
+        "intensity_percent": cct.get("intensity_percent"),
         "check_sum": telink_status.get("check_sum"),
         "command_type": telink_status.get("command_type"),
         "opera_type": telink_status.get("opera_type"),
@@ -2825,6 +3019,8 @@ def mac_suffix(value):
     return normalized[-6:] if normalized else ""
 
 def fixture_label(fixture):
+    if fixture.get("friendly_name"):
+        return str(fixture["friendly_name"])
     if fixture.get("name"):
         return str(fixture["name"])
     code = fixture.get("code")
@@ -2857,6 +3053,30 @@ def occupied_fixture_addresses(fixtures):
         if address is not None:
             occupied.add(address)
     return occupied
+
+def selector_values(fixture):
+    values = []
+    address = int_in_range(fixture.get("node_address"), 1, 0x7FFF)
+    if address is not None:
+        values.append(str(address))
+        values.append(hex(address))
+    for key in ("friendly_name", "name"):
+        value = fixture.get(key)
+        if isinstance(value, str) and value:
+            values.append(value)
+    return values
+
+def select_fixture(fixtures, selector):
+    selector_text = str(selector)
+    matches = [
+        fixture for fixture in fixtures
+        if isinstance(fixture, dict) and any(value == selector_text for value in selector_values(fixture))
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        fail(f"fixture selector is ambiguous: {selector_text}")
+    fail(f"no fixture found for node {selector_text}")
 
 def reset_source_address(runtime, fixtures, destination):
     occupied = occupied_fixture_addresses(fixtures)
@@ -2906,14 +3126,7 @@ if sequence_next is None:
     fail("local state runtime data has invalid sequence_next")
 
 if node_id:
-    try:
-        wanted = int(node_id, 0)
-    except ValueError:
-        fail("--node must be a fixture node address for node reset")
-    matches = [fixture for fixture in fixtures if isinstance(fixture, dict) and fixture.get("node_address") == wanted]
-    if not matches:
-        fail(f"no fixture found for node {node_id}")
-    fixture = matches[0]
+    fixture = select_fixture(fixtures, node_id)
 else:
     candidates = [fixture for fixture in fixtures if isinstance(fixture, dict)]
     if len(candidates) != 1:
@@ -3093,6 +3306,16 @@ run_native_control_preferred() {
   run_native_control_app "$spec" "$output_style"
 }
 
+run_native_control_quiet_spec() {
+  local spec="$1"
+  local saved_json="$JSON"
+  JSON=0
+  run_native_control_app "$spec" quiet >/dev/null
+  local command_status=$?
+  JSON="$saved_json"
+  return "$command_status"
+}
+
 run_control_command() {
   local action="$1"
   shift
@@ -3117,6 +3340,168 @@ run_status_command() {
   fi
 
   run_native_status_preferred
+}
+
+run_identify_command() {
+  if [[ ! -s "$STATE_PATH" ]]; then
+    echo "amaran: identify requires local state at $STATE_PATH" >&2
+    return 1
+  fi
+  if [[ ${#POSITIONALS[@]} -gt 1 ]]; then
+    echo "amaran: identify accepts at most one fixture node/name" >&2
+    return 1
+  fi
+  if [[ ${#POSITIONALS[@]} -eq 1 ]]; then
+    if [[ -n "$NODE_ID" ]]; then
+      echo "amaran: pass fixture node/name either as identify argument or --node, not both" >&2
+      return 1
+    fi
+    NODE_ID="$POSITIONALS[1]"
+  fi
+
+  local status_json
+  local error_output
+  error_output="$(mktemp -t amaran-identify-status-error)"
+  if ! status_json="$(capture_native_status_json 2>"$error_output")"; then
+    cat "$error_output" >&2
+    rm -f "$error_output"
+    return 1
+  fi
+  rm -f "$error_output"
+
+  local plan_json
+  local parse_error
+  parse_error="$(mktemp -t amaran-identify-parse-error)"
+  if ! plan_json="$(STATUS_JSON="$status_json" /usr/bin/python3 - 2>"$parse_error" <<'PY'
+import json
+import os
+import sys
+
+try:
+    payload = json.loads(os.environ["STATUS_JSON"])
+except (KeyError, json.JSONDecodeError):
+    print("amaran: status returned invalid JSON", file=sys.stderr)
+    sys.exit(1)
+
+cct = payload.get("cct") or {}
+address = payload.get("address")
+sleep_mode = cct.get("sleep_mode")
+intensity = cct.get("intensity_percent")
+if intensity is None:
+    raw_intensity = cct.get("intensity")
+    if isinstance(raw_intensity, (int, float)):
+        intensity = raw_intensity / 10
+cct_kelvin = cct.get("cct")
+gm = cct.get("gm", 10)
+gm_flag = cct.get("gm_flag", 0)
+
+def cct_spec(kelvin, percent):
+    return f"cct:{int(kelvin)}:{float(percent):g}:{int(gm)}:{int(gm_flag)}"
+
+if cct_kelvin is not None and intensity is not None:
+    restore_spec = cct_spec(cct_kelvin, intensity)
+elif intensity is not None:
+    restore_spec = f"intensity:{float(intensity):g}"
+else:
+    restore_spec = "on"
+
+original_state = "on"
+if sleep_mode == 0:
+    original_state = "off"
+    restore_spec = "off"
+
+if cct_kelvin is not None:
+    flash_on_spec = cct_spec(cct_kelvin, 100)
+else:
+    flash_on_spec = "intensity:100"
+
+print(json.dumps({
+    "address": address,
+    "original_state": original_state,
+    "restore_spec": restore_spec,
+    "flash_on_spec": flash_on_spec,
+}))
+PY
+  )"; then
+    cat "$parse_error" >&2
+    rm -f "$parse_error"
+    return 1
+  fi
+  rm -f "$parse_error"
+
+  local restore_spec
+  local flash_on_spec
+  local original_state
+  local address
+  restore_spec="$(PLAN_JSON="$plan_json" /usr/bin/python3 - <<'PY'
+import json, os
+print(json.loads(os.environ["PLAN_JSON"])["restore_spec"])
+PY
+)"
+  flash_on_spec="$(PLAN_JSON="$plan_json" /usr/bin/python3 - <<'PY'
+import json, os
+print(json.loads(os.environ["PLAN_JSON"])["flash_on_spec"])
+PY
+)"
+  original_state="$(PLAN_JSON="$plan_json" /usr/bin/python3 - <<'PY'
+import json, os
+print(json.loads(os.environ["PLAN_JSON"])["original_state"])
+PY
+)"
+  address="$(PLAN_JSON="$plan_json" /usr/bin/python3 - <<'PY'
+import json, os
+value = json.loads(os.environ["PLAN_JSON"]).get("address")
+print(value if value is not None else "unknown")
+PY
+)"
+
+  local count=3
+  local index
+  for index in 1 2 3; do
+    if [[ "$original_state" == "off" ]]; then
+      run_native_control_quiet_spec on || return 1
+      sleep 0.15
+      run_native_control_quiet_spec "$flash_on_spec" || return 1
+      sleep 0.45
+      run_native_control_quiet_spec off || return 1
+      sleep 0.45
+    else
+      run_native_control_quiet_spec off || return 1
+      sleep 0.45
+      run_native_control_quiet_spec on || return 1
+      sleep 0.15
+      run_native_control_quiet_spec "$restore_spec" || return 1
+      sleep 0.45
+    fi
+  done
+
+  if [[ "$original_state" == "off" ]]; then
+    run_native_control_quiet_spec off || return 1
+  else
+    run_native_control_quiet_spec on || return 1
+    sleep 0.15
+    run_native_control_quiet_spec "$restore_spec" || return 1
+    sleep 0.15
+    run_native_control_quiet_spec "$restore_spec" || return 1
+  fi
+
+  if [[ "$JSON" == "1" ]]; then
+    PLAN_JSON="$plan_json" /usr/bin/python3 - "$count" <<'PY'
+import json
+import os
+import sys
+
+plan = json.loads(os.environ["PLAN_JSON"])
+print(json.dumps({
+    "identified": True,
+    "address": plan.get("address"),
+    "flashes": int(sys.argv[1]),
+    "restored": plan.get("original_state"),
+}, indent=2))
+PY
+  else
+    echo "identified address $address with $count flashes"
+  fi
 }
 
 run_probe_command() {
@@ -3214,6 +3599,9 @@ case "$COMMAND" in
   discover)
     run_discover_command
     ;;
+  fixture)
+    run_fixture_command
+    ;;
   scene)
     run_scene_command
     ;;
@@ -3225,6 +3613,9 @@ case "$COMMAND" in
     ;;
   status)
     run_status_command
+    ;;
+  identify)
+    run_identify_command
     ;;
   on|off)
     run_control_command "$COMMAND"

@@ -37,13 +37,16 @@ truth, then import that mesh metadata from an encrypted local iPad backup.
 ./bin/amaran state-join /tmp/sidus-join.json
 ./bin/amaran state-install /tmp/amaran-test-state.json
 ./bin/amaran discover --range 2-64 --update-state
-./bin/amaran scene capture "recording scene" --node 7
-./bin/amaran scene apply "recording scene" --node 7
+./bin/amaran fixture rename 6 desk-key
+./bin/amaran scene capture "recording scene" --node desk-key
+./bin/amaran scene apply "recording scene" --node desk-key
+./bin/amaran fixture clear-name desk-key
 ./bin/amaran scene list
 ./bin/amaran scene show "recording scene"
 ./bin/amaran list
 ./bin/amaran probe
 ./bin/amaran status
+./bin/amaran identify desk-key
 ./bin/amaran on
 ./bin/amaran off
 ./bin/amaran intensity 25
@@ -51,10 +54,11 @@ truth, then import that mesh metadata from an encrypted local iPad backup.
 ./bin/amaran cct 3200 --intensity 10
 ```
 
-Use `--node <id>` or `AMARAN_NODE_ID=<id>` if more than one fixture is present.
-Use `--state-path <file>` or `AMARAN_CLI_STATE_PATH=<file>` to point commands
-at a different local state file, which is useful for pairing tests without
-moving the real state.
+Use `--node <id-or-name>` or `AMARAN_NODE_ID=<id-or-name>` if more than one
+fixture is present. Use `fixture rename` to give a fixture a local name like
+`desk-key` or `tube-left`. Use `--state-path <file>` or
+`AMARAN_CLI_STATE_PATH=<file>` to point commands at a different local state
+file, which is useful for pairing tests without moving the real state.
 
 Run `./bin/amaran help` or `./bin/amaran --help` for the built-in command
 reference. That output is intentionally safe to paste into an issue or terminal
@@ -136,6 +140,21 @@ the CLI-owned Config source address, discovery moves that source address before
 probing so an iPad-assigned fixture at that address is not skipped. Take a fresh
 encrypted iPad backup and rerun `sidus-import --replace` when you need updated
 names, MACs, DeviceKeys, app metadata, or if Sidus creates a new mesh/AppKey.
+
+Local fixture names are for the CLI only:
+
+```sh
+./bin/amaran list
+./bin/amaran fixture rename 6 desk-key
+./bin/amaran status --node desk-key
+./bin/amaran identify desk-key
+./bin/amaran intensity 18 --node desk-key
+./bin/amaran fixture clear-name desk-key
+```
+
+The friendly name is stored as `friendly_name` in local state. It does not
+rename the light in Sidus Link Pro, and it preserves the imported Sidus/source
+name underneath.
 
 Scenes live in the same local state file:
 
@@ -238,11 +257,12 @@ and writable. It does not send provisioning PDUs or write state.
 `pair --add` reuses the existing mesh NetKey/AppKey and appends one newly
 provisioned fixture. It does not remove old fixtures. Once more than one
 fixture is present, runtime commands need a target unless `AMARAN_NODE_ID` is
-set:
+set. That target can be either a node address or a friendly name:
 
 ```sh
-./bin/amaran intensity 18 --node 18
-AMARAN_NODE_ID=18 ./bin/amaran status
+./bin/amaran fixture rename 18 tube-left
+./bin/amaran intensity 18 --node tube-left
+AMARAN_NODE_ID=tube-left ./bin/amaran status
 ```
 
 If you need to make an already-provisioned owned fixture unprovisioned, there is
@@ -266,12 +286,13 @@ Stable runtime commands require local CLI state and use the Mesh Proxy path.
 | Command | Purpose |
 | --- | --- |
 | `./bin/amaran list [--json]` | Print fixture names, node addresses, and MACs or `unknown` from local state. |
-| `./bin/amaran probe [--node <id>] [--json]` | Connect to the matching Mesh Proxy advertisement using the Network ID from local state. |
-| `./bin/amaran status [--node <id>] [--json]` | Read and decode the vendor CCT status packet. |
-| `./bin/amaran on [--node <id>]` | Send Telink vendor on. |
-| `./bin/amaran off [--node <id>]` | Send Telink vendor off. |
-| `./bin/amaran intensity <0-100> [--node <id>]` | Send Telink brightness in percent. |
-| `./bin/amaran cct <kelvin> [--intensity <0-100>] [--node <id>]` | Send Telink CCT. Without `--intensity`, the CLI reads status first and preserves the current intensity. |
+| `./bin/amaran probe [--node <id-or-name>] [--json]` | Connect to the matching Mesh Proxy advertisement using the Network ID from local state. |
+| `./bin/amaran status [--node <id-or-name>] [--json]` | Read and decode the vendor CCT status packet. |
+| `./bin/amaran identify [<id-or-name>] [--node <id-or-name>] [--json]` | Blink the selected fixture three times, then restore its previous on/off, intensity, and CCT state. |
+| `./bin/amaran on [--node <id-or-name>]` | Send Telink vendor on. |
+| `./bin/amaran off [--node <id-or-name>]` | Send Telink vendor off. |
+| `./bin/amaran intensity <0-100> [--node <id-or-name>]` | Send Telink brightness in percent. |
+| `./bin/amaran cct <kelvin> [--intensity <0-100>] [--node <id-or-name>]` | Send Telink CCT. Without `--intensity`, the CLI reads status first and preserves the current intensity. |
 
 State and pairing commands manage local state and fixture setup.
 
@@ -284,8 +305,10 @@ State and pairing commands manage local state and fixture setup.
 | `./bin/amaran state-join <join-state.json> [--json]` | Join an existing mesh for runtime control from externally supplied NetKey/AppKey metadata. Writes control-only fixture state when DeviceKeys are absent. |
 | `./bin/amaran state-install <source-state.json> [--json]` | Validate and install a state file with `0600` permissions. Refuses to overwrite existing target state. |
 | `./bin/amaran discover --range <spec> [--update-state] [--json]` | Probe candidate unicast addresses on the current mesh and optionally keep responsive control-only fixture entries. |
-| `./bin/amaran scene capture <name> [--node <id>] [--json]` | Read live status from fixtures and save a named scene in local state. With `--node`, capture only that fixture. |
-| `./bin/amaran scene apply <name> [--node <id>] [--json]` | Apply a saved scene through direct runtime commands. With `--node`, apply only that fixture's entry. |
+| `./bin/amaran fixture rename <node> <friendly-name> [--json]` | Store a CLI-only friendly name for a fixture. Names are safe to print and do not change Sidus metadata. |
+| `./bin/amaran fixture clear-name <node> [--json]` | Remove a CLI-only friendly name and fall back to the imported source name. |
+| `./bin/amaran scene capture <name> [--node <id-or-name>] [--json]` | Read live status from fixtures and save a named scene in local state. With `--node`, capture only that fixture. |
+| `./bin/amaran scene apply <name> [--node <id-or-name>] [--json]` | Apply a saved scene through direct runtime commands. With `--node`, apply only that fixture's entry. |
 | `./bin/amaran scene list [--json]` | List saved scenes without launching BLE. |
 | `./bin/amaran scene show <name> [--json]` | Show one saved scene without launching BLE. |
 
@@ -300,22 +323,22 @@ packet testing, and Config Client work.
 | `./bin/amaran provision-test [--add] [--attention <0-255>] [--json]` | Run no-OOB PB-GATT provisioning and write or append state, without post-provision configuration. |
 | `./bin/amaran pair-test [--add] [--attention <0-255>] [--dry-run] [--verify] [--json]` | Diagnostic alias for provisioning plus post-provision configuration. |
 | `./bin/amaran proxy-test [--json]` | Write a public sample Mesh Proxy PDU. |
-| `./bin/amaran sig-onoff-test <on\|off> [--node <id>] [--json]` | Send a standard Generic OnOff test PDU. The 60x S does not apply this to emitter output. |
-| `./bin/amaran control-test <on\|off\|intensity\|cct> [value] [--intensity <0-100>] [--node <id>] [--json]` | Send reconstructed Telink `0x26` control payloads. |
-| `./bin/amaran status-test [--node <id>] [--json]` | Read and decode Telink `0x26` status. |
-| `./bin/amaran configure-test [--node <id>] [--json]` | Fetch composition, ensure AppKey index 0, and bind the vendor model. |
-| `./bin/amaran config-composition-get-test [--node <id>] [--json]` | Fetch and store Composition Data Page 0. |
-| `./bin/amaran config-appkey-get-test [--node <id>] [--json]` | Read safe AppKey index metadata. |
-| `./bin/amaran config-appkey-add-test [--node <id>] [--json]` | Send segmented DeviceKey Config AppKey Add. |
-| `./bin/amaran config-model-app-bind-test [--node <id>] [--json]` | Bind AppKey index 0 to the first vendor model. |
-| `./bin/amaran config-node-reset-test --dry-run [--node <id>] [--json]` | Validate the selected fixture and print a redacted reset preview. |
-| `./bin/amaran config-node-reset-test --confirm-reset [--node <id>] [--json]` | Send destructive DeviceKey Config Node Reset. Treat existing state for that fixture as stale afterward. |
+| `./bin/amaran sig-onoff-test <on\|off> [--node <id-or-name>] [--json]` | Send a standard Generic OnOff test PDU. The 60x S does not apply this to emitter output. |
+| `./bin/amaran control-test <on\|off\|intensity\|cct> [value] [--intensity <0-100>] [--node <id-or-name>] [--json]` | Send reconstructed Telink `0x26` control payloads. |
+| `./bin/amaran status-test [--node <id-or-name>] [--json]` | Read and decode Telink `0x26` status. |
+| `./bin/amaran configure-test [--node <id-or-name>] [--json]` | Fetch composition, ensure AppKey index 0, and bind the vendor model. |
+| `./bin/amaran config-composition-get-test [--node <id-or-name>] [--json]` | Fetch and store Composition Data Page 0. |
+| `./bin/amaran config-appkey-get-test [--node <id-or-name>] [--json]` | Read safe AppKey index metadata. |
+| `./bin/amaran config-appkey-add-test [--node <id-or-name>] [--json]` | Send segmented DeviceKey Config AppKey Add. |
+| `./bin/amaran config-model-app-bind-test [--node <id-or-name>] [--json]` | Bind AppKey index 0 to the first vendor model. |
+| `./bin/amaran config-node-reset-test --dry-run [--node <id-or-name>] [--json]` | Validate the selected fixture and print a redacted reset preview. |
+| `./bin/amaran config-node-reset-test --confirm-reset [--node <id-or-name>] [--json]` | Send destructive DeviceKey Config Node Reset. Treat existing state for that fixture as stale afterward. |
 
 Global options:
 
 | Option | Meaning |
 | --- | --- |
-| `--node <id>` | Fixture node address. Defaults to `AMARAN_NODE_ID`, then the only fixture in local state. |
+| `--node <id-or-name>` | Fixture node address or friendly name. Defaults to `AMARAN_NODE_ID`, then the only fixture in local state. |
 | `--timeout <sec>` | BLE helper timeout. Defaults to `AMARAN_TIMEOUT` or `20`. |
 | `--attention <sec>` | Provisioning Invite attention duration from `0` to `255`. Defaults to `AMARAN_ATTENTION_DURATION` or `0`. |
 | `--add` | For `pair`/`provision-test`, append an unprovisioned fixture to the existing studio manifest instead of creating a new mesh. |

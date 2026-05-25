@@ -58,6 +58,8 @@ def mac_suffix(value):
 
 
 def fixture_label(fixture):
+    if fixture.get("friendly_name"):
+        return str(fixture["friendly_name"])
     if fixture.get("name"):
         return str(fixture["name"])
     suffix = mac_suffix(fixture.get("mac_address"))
@@ -153,6 +155,32 @@ def normalize_cct_kelvin(value):
     return value
 
 
+def selector_values(fixture):
+    values = []
+    address = fixture.get("node_address")
+    if isinstance(address, int):
+        values.append(str(address))
+        values.append(hex(address))
+    for key in ("friendly_name", "name"):
+        value = fixture.get(key)
+        if isinstance(value, str) and value:
+            values.append(value)
+    return values
+
+
+def select_fixture(fixtures, selector):
+    selector_text = str(selector)
+    matches = [
+        fixture for fixture in fixtures
+        if any(value == selector_text for value in selector_values(fixture))
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        fail(f"scene fixture selector is ambiguous: {selector_text}")
+    fail(f"scene fixture not found: {selector_text}")
+
+
 def scene_summary(name, scene):
     fixtures = scene.get("fixtures") if isinstance(scene.get("fixtures"), list) else []
     return {
@@ -167,14 +195,7 @@ def selected_fixtures(payload, node_id):
     fixtures = [fixture for fixture in payload.get("fixtures", []) if isinstance(fixture, dict)]
     if node_id in (None, ""):
         return fixtures
-    try:
-        address = int(str(node_id), 0)
-    except ValueError:
-        fail("scene --node must be a fixture address")
-    matches = [fixture for fixture in fixtures if fixture.get("node_address") == address]
-    if not matches:
-        fail(f"scene fixture not found at address {address}")
-    return matches
+    return [select_fixture(fixtures, node_id)]
 
 
 def cmd_capture(args):
@@ -222,10 +243,8 @@ def cmd_apply(args):
         fail(f"scene not found: {args.name}")
     selected_address = None
     if args.node not in (None, ""):
-        try:
-            selected_address = int(str(args.node), 0)
-        except ValueError:
-            fail("scene --node must be a fixture address")
+        selected = select_fixture([fixture for fixture in payload.get("fixtures", []) if isinstance(fixture, dict)], args.node)
+        selected_address = selected.get("node_address")
     applied = []
     for entry in scene.get("fixtures") or []:
         if not isinstance(entry, dict) or not isinstance(entry.get("node_address"), int):

@@ -57,9 +57,13 @@ Useful commands:
 - `./bin/amaran state-install <source-state.json> --json`
 - `./bin/amaran discover --range <start-end[,addr]> [--update-state]`
 - `./bin/amaran discover --range <start-end[,addr]> [--update-state] --json`
-- `./bin/amaran scene capture <name> [--node <id>]`
+- `./bin/amaran fixture rename <node> <friendly-name>`
+- `./bin/amaran fixture rename <node> <friendly-name> --json`
+- `./bin/amaran fixture clear-name <node>`
+- `./bin/amaran fixture clear-name <node> --json`
+- `./bin/amaran scene capture <name> [--node <id-or-name>]`
 - `./bin/amaran scene capture <name> --json`
-- `./bin/amaran scene apply <name> [--node <id>]`
+- `./bin/amaran scene apply <name> [--node <id-or-name>]`
 - `./bin/amaran scene apply <name> --json`
 - `./bin/amaran scene list`
 - `./bin/amaran scene list --json`
@@ -68,6 +72,8 @@ Useful commands:
 - `./bin/amaran list`
 - `./bin/amaran probe`
 - `./bin/amaran status`
+- `./bin/amaran identify [<id-or-name>]`
+- `./bin/amaran identify [<id-or-name>] --json`
 - `./bin/amaran on`
 - `./bin/amaran off`
 - `./bin/amaran intensity <0-100>`
@@ -81,9 +87,19 @@ Implementation notes:
   Link Pro on the iPad, create an encrypted local iPad backup, run
   `./bin/amaran sidus-import --backup <path>`, then use direct CLI runtime
   commands and `scene` commands. This keeps the iPad as pairing source of truth.
-- `list`, `probe`, `status`, `on`, `off`, `intensity`, and `cct` are direct
+- `list`, `probe`, `status`, `identify`, `on`, `off`, `intensity`, and `cct` are direct
   runtime commands. They require local CLI state and must not silently fall back
   to third-party app databases or helper bundles.
+- `./bin/amaran fixture rename <node> <friendly-name>` stores a CLI-only
+  `friendly_name` on the selected fixture. Runtime commands, diagnostics, and
+  scene commands should accept that friendly name anywhere `--node` is accepted.
+  It must preserve the imported/source `name`, refuse duplicate or numeric
+  friendly names, write state with `0600`, and avoid printing key material.
+  `fixture clear-name <node>` removes only the local `friendly_name`.
+- `./bin/amaran identify [<id-or-name>]` reads vendor status, blinks the
+  selected fixture three times, then restores the previous on/off, intensity,
+  and CCT state. It should use direct runtime commands, accept friendly names,
+  and avoid printing key material.
 - `doctor` runs directly in the wrapper. It reports local state, safe runtime
   counters, and control readiness without launching BLE. It does not print key
   material.
@@ -141,7 +157,7 @@ Implementation notes:
   so a later iPad-assigned fixture at that address is not skipped.
 - `./bin/amaran scene capture <name>` reads live vendor status from fixtures and
   stores a local named scene in the top-level `scenes` object. With
-  `--node <id>`, it captures only that fixture. `scene apply` restores saved
+  `--node <id-or-name>`, it captures only that fixture. `scene apply` restores saved
   intensity/CCT/sleep state through direct runtime commands; with `--node`, it
   applies only that fixture's saved entry. `scene list` and `scene show` are
   offline reads. Scene commands must not print mesh/app/device keys.

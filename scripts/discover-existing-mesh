@@ -148,6 +148,8 @@ def mac_suffix(value):
 
 
 def fixture_label(fixture):
+    if fixture.get("friendly_name"):
+        return str(fixture["friendly_name"])
     if fixture.get("name"):
         return str(fixture["name"])
     suffix = mac_suffix(fixture.get("mac_address"))
