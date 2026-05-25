@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 .DS_Store
+.env
+.env.*
 state.json
 *.state.json
 BluetoothProbe.app/Contents/MacOS/BluetoothProbe

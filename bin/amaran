@@ -154,6 +154,8 @@ Environment:
                                Optional venv path for the encrypted backup
                                importer dependency. Defaults under
                                ~/Library/Application Support/amaran-cli.
+  The CLI does not load .env files. Do not store mesh, app, or device keys in
+  environment variables; they belong only in the 0600 local state manifest.
 
 Sidus-first studio workflow:
   1. Pair and organize fixtures in Sidus Link Pro on the iPad.
@@ -161,13 +163,13 @@ Sidus-first studio workflow:
        ./bin/amaran sidus-import --backup /path/to/Backup
   3. Confirm CLI control sees the same mesh:
        ./bin/amaran list
-       ./bin/amaran status --node 7
+       ./bin/amaran status --node <address-from-list>
   4. When Sidus adds more fixtures to the same mesh, discover responsive
      addresses without re-pairing through the CLI:
        ./bin/amaran discover --range 2-64 --update-state
   5. Save and recall lighting looks:
-       ./bin/amaran scene capture "recording scene" --node 7
-       ./bin/amaran scene apply "recording scene" --node 7
+       ./bin/amaran scene capture "recording scene" --node <address-from-list>
+       ./bin/amaran scene apply "recording scene" --node <address-from-list>
 
   A fresh Sidus backup is still the authoritative way to import Sidus app
   metadata, DeviceKeys, or a changed mesh/AppKey. discover can find runtime
@@ -195,8 +197,8 @@ Examples:
   ./bin/amaran sidus-import --backup /private/tmp/Backup
   ./bin/amaran state-join /tmp/sidus-join.json
   ./bin/amaran discover --range 2-64 --update-state
-  ./bin/amaran scene capture "recording scene" --node 7
-  ./bin/amaran scene apply "recording scene" --node 7
+  ./bin/amaran scene capture "recording scene" --node <address-from-list>
+  ./bin/amaran scene apply "recording scene" --node <address-from-list>
   ./bin/amaran pair --dry-run --state-path /tmp/amaran-state.json
   ./bin/amaran pair --verify --state-path /tmp/amaran-state.json
   ./bin/amaran pair --add --verify

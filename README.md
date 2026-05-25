@@ -68,6 +68,13 @@ addresses, and sequence counters. Do not commit or share it. Safe CLI output
 may include fixture counts, names, node addresses, model codes, and MAC
 suffixes, but must not print key material.
 
+The CLI does not load a `.env` file, and DeviceKeys should not live in one.
+Environment variables are only convenience defaults such as `AMARAN_NODE_ID`,
+`AMARAN_TIMEOUT`, `AMARAN_CLI_STATE_PATH`, and the optional
+`AMARAN_IOS_BACKUP_PASSWORD` import helper. The key-bearing file is the local
+state manifest, normally
+`~/Library/Application Support/amaran-cli/state.json`.
+
 Commands reserve sequence numbers in that state. DeviceKey Config sends
 use a CLI-owned source address, normally `3` or the next unused unicast address.
 Telink vendor runtime control/status uses a separate source address, normally
@@ -97,7 +104,7 @@ and fixture setup:
 
 # Confirm local control.
 ./bin/amaran list
-./bin/amaran status --node 7
+./bin/amaran status --node <address-from-list>
 
 # Save and recall live looks.
 ./bin/amaran scene capture "recording scene"
@@ -134,11 +141,11 @@ Scenes live in the same local state file:
 
 ```sh
 ./bin/amaran scene capture "recording scene"
-./bin/amaran scene capture "recording scene" --node 7
+./bin/amaran scene capture "recording scene" --node <address-from-list>
 ./bin/amaran scene list
 ./bin/amaran scene show "recording scene"
 ./bin/amaran scene apply "recording scene"
-./bin/amaran scene apply "recording scene" --node 7
+./bin/amaran scene apply "recording scene" --node <address-from-list>
 ```
 
 `scene capture` reads live fixture status and stores intensity, CCT, and sleep
@@ -287,7 +294,7 @@ packet testing, and Config Client work.
 
 | Command | Purpose |
 | --- | --- |
-| `./bin/amaran gatt-probe [--json]` | Discover Mesh Proxy and Provisioning GATT services. |
+| `./bin/amaran gatt-probe [--all-services] [--read-values] [--json]` | Discover Mesh Proxy and Provisioning GATT services. `--all-services` dumps the selected peripheral's full service list; `--read-values` reads safe readable characteristic values. |
 | `./bin/amaran provision-scan [--json]` | Scan for unprovisioned PB-GATT advertisers without writing provisioning PDUs. |
 | `./bin/amaran provision-invite-test [--attention <0-255>] [--json]` | Send only Provisioning Invite and decode Capabilities. |
 | `./bin/amaran provision-test [--add] [--attention <0-255>] [--json]` | Run no-OOB PB-GATT provisioning and write or append state, without post-provision configuration. |
@@ -322,6 +329,8 @@ Global options:
 | `--dry-run` | For `pair`, preflight and scan only. For node reset, validate and print the selected fixture without sending reset. |
 | `--verify` | For `pair`, read status after provisioning/configuration. |
 | `--confirm-reset` | Required for destructive Config Node Reset. |
+| `--all-services` | For `gatt-probe`, discover all advertised services after selecting a mesh peripheral. |
+| `--read-values` | For `gatt-probe`, read safe readable characteristic values. |
 | `--json` | Print JSON where supported. JSON output must not include mesh, app, or device keys. |
 | `--help`, `-h` | Show built-in help. |
 
