@@ -375,9 +375,18 @@ JSON
 SH
 chmod +x "$FAKE_DISCOVER_ROOT/bin/amaran"
 DISCOVER_COLLISION_OUTPUT="$("$ROOT/scripts/discover-existing-mesh" --root "$FAKE_DISCOVER_ROOT" --state-path "$DISCOVER_COLLISION_STATE" --range 7 --update-state)"
+assert_contains "$DISCOVER_COLLISION_OUTPUT" "discover scanning 1 address" "discover progress summary"
+assert_contains "$DISCOVER_COLLISION_OUTPUT" "[1/1] probing address 7" "discover progress probe"
+assert_contains "$DISCOVER_COLLISION_OUTPUT" "[1/1] found address 7" "discover progress found"
 assert_contains "$DISCOVER_COLLISION_OUTPUT" "discovered 1 fixtures" "discover source collision summary"
 assert_contains "$DISCOVER_COLLISION_OUTPUT" "runtime source moved 7->" "discover source collision relocation"
 assert_contains "$DISCOVER_COLLISION_OUTPUT" "fixture-7" "discover source collision fixture"
+DISCOVER_JSON_STDOUT="$TMPDIR/discover-json.stdout"
+DISCOVER_JSON_STDERR="$TMPDIR/discover-json.stderr"
+"$ROOT/scripts/discover-existing-mesh" --root "$FAKE_DISCOVER_ROOT" --state-path "$DISCOVER_COLLISION_STATE" --range 7 --update-state --json >"$DISCOVER_JSON_STDOUT" 2>"$DISCOVER_JSON_STDERR"
+assert_contains "$(cat "$DISCOVER_JSON_STDOUT")" '"discovered": 1' "discover json result"
+assert_not_contains "$(cat "$DISCOVER_JSON_STDOUT")" "probing address" "discover json stdout progress"
+assert_contains "$(cat "$DISCOVER_JSON_STDERR")" "[1/1] probing address 7" "discover json stderr progress"
 python3 - "$DISCOVER_COLLISION_STATE" <<'PY'
 import json
 import sys

@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -182,6 +183,13 @@ def remove_fixture(payload, address):
     ]
 
 
+def find_fixture(payload, address):
+    return next(
+        (item for item in payload.get("fixtures", []) if isinstance(item, dict) and item.get("node_address") == address),
+        None,
+    )
+
+
 def status_for(root, state_path, timeout, address):
     command = [
         str(Path(root) / "bin" / "amaran"),
@@ -216,7 +224,31 @@ def normalize_status(address, fixture, raw_status):
     }
 
 
+def progress(args, message):
+    stream = sys.stderr if args.json else sys.stdout
+    print(message, file=stream, flush=True)
+
+
+def status_detail(fixture):
+    details = []
+    if fixture.get("intensity") is not None:
+        details.append(f"{fixture['intensity']:g}%")
+    if fixture.get("cct") is not None:
+        details.append(f"{fixture['cct']}K")
+    if fixture.get("sleep_mode") is not None:
+        details.append(f"sleep={fixture['sleep_mode']}")
+    return ", ".join(details)
+
+
+def install_interrupt_handler():
+    def handle_signal(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, handle_signal)
+
+
 def main():
+    install_interrupt_handler()
     parser = argparse.ArgumentParser(description="Discover control-capable fixtures already on a known mesh")
     parser.add_argument("--root", required=True)
     parser.add_argument("--state-path", required=True)
@@ -232,40 +264,69 @@ def main():
     source_relocation = relocate_runtime_source_if_needed(payload, addresses)
     if source_relocation:
         write_state(state_path, payload)
+        progress(args, f"discover moved runtime source {source_relocation['from']}->{source_relocation['to']} before scanning")
     runtime = payload.get("runtime") or {}
     reserved = {runtime.get("telink_source_address")}
 
+    total = len(addresses)
+    mode = "updating state" if args.update_state else "probing without adding fixtures"
+    progress(args, f"discover scanning {total} address{'es' if total != 1 else ''} in range {args.range} ({mode})")
+
     found = []
     misses = []
-    for address in addresses:
-        if address in reserved:
-            misses.append({"address": address, "reason": "reserved-source-address"})
-            continue
+    active_temporary_address = None
+    try:
+        for index, address in enumerate(addresses, start=1):
+            step = f"[{index}/{total}]"
+            if address in reserved:
+                misses.append({"address": address, "reason": "reserved-source-address"})
+                progress(args, f"{step} skip address {address}: reserved Telink source address")
+                continue
 
-        payload = load_state(state_path)
-        added = ensure_fixture(payload, address)
-        write_state(state_path, payload)
+            payload = load_state(state_path)
+            fixture_before = find_fixture(payload, address)
+            label = f" ({fixture_label(fixture_before)})" if fixture_before else ""
+            progress(args, f"{step} probing address {address}{label}")
 
-        result = status_for(args.root, state_path, args.timeout, address)
-        latest = load_state(state_path)
-        fixture = next(
-            (item for item in latest.get("fixtures", []) if isinstance(item, dict) and item.get("node_address") == address),
-            {"node_address": address, "name": f"fixture-{address}"},
-        )
-        if result.returncode == 0:
-            try:
-                raw_status = json.loads(result.stdout)
-            except json.JSONDecodeError:
-                raw_status = {}
-            found.append(normalize_status(address, fixture, raw_status))
-            if added and not args.update_state:
-                remove_fixture(latest, address)
-                write_state(state_path, latest)
-        else:
-            misses.append({"address": address, "reason": "no-status"})
+            added = ensure_fixture(payload, address)
             if added:
-                remove_fixture(latest, address)
+                active_temporary_address = address
+            write_state(state_path, payload)
+
+            result = status_for(args.root, state_path, args.timeout, address)
+            latest = load_state(state_path)
+            fixture = find_fixture(latest, address) or {"node_address": address, "name": f"fixture-{address}"}
+            if result.returncode == 0:
+                try:
+                    raw_status = json.loads(result.stdout)
+                except json.JSONDecodeError:
+                    raw_status = {}
+                status = normalize_status(address, fixture, raw_status)
+                found.append(status)
+                detail = status_detail(status)
+                detail_suffix = f": {detail}" if detail else ""
+                progress(args, f"{step} found address {address}: {status['name']}{detail_suffix}")
+                if added and not args.update_state:
+                    remove_fixture(latest, address)
+                    write_state(state_path, latest)
+                active_temporary_address = None
+            else:
+                misses.append({"address": address, "reason": "no-status"})
+                progress(args, f"{step} no response at address {address}")
+                if added:
+                    remove_fixture(latest, address)
+                    write_state(state_path, latest)
+                active_temporary_address = None
+    except KeyboardInterrupt:
+        if active_temporary_address is not None:
+            try:
+                latest = load_state(state_path)
+                remove_fixture(latest, active_temporary_address)
                 write_state(state_path, latest)
+                progress(args, f"discover interrupted; removed temporary fixture-{active_temporary_address}")
+            except Exception as exc:
+                print(f"amaran: discover interrupted; failed to remove temporary fixture-{active_temporary_address}: {exc}", file=sys.stderr)
+        raise
 
     output = {
         "discovered": len(found),
