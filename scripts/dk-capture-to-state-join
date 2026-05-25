@@ -1,0 +1,233 @@
+#!/usr/bin/env node
+
+delete process.env.NO_COLOR;
+
+const fs = require("fs");
+const path = require("path");
+
+const CAPTURE_LENGTH = 96;
+const MAGIC = 0x414d4341;
+
+function usage() {
+  console.error(`usage: scripts/dk-capture-to-state-join --capture <capture.hex|capture.bin> --output <join-state.json> --fixture <node-address[=name]> [--fixture <node-address[=name]> ...] [--mesh-uuid <id>] [--sequence-next <n>]
+
+Converts a key-bearing nRF52840 DK Sidus join capture into the key-bearing
+source JSON consumed by ./bin/amaran state-join. Output is written with 0600
+permissions and command output is redacted.`);
+  process.exit(2);
+}
+
+function fail(message) {
+  console.error(`dk-capture-to-state-join: ${message}`);
+  process.exit(1);
+}
+
+function parseInteger(value, label, minimum, maximum) {
+  let parsed;
+  if (typeof value === "string" && /^0x[0-9a-f]+$/i.test(value.trim())) {
+    parsed = Number.parseInt(value, 16);
+  } else {
+    parsed = Number.parseInt(String(value), 10);
+  }
+  if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) {
+    fail(`invalid ${label}`);
+  }
+  return parsed;
+}
+
+function parseFixture(value) {
+  const match = String(value).match(/^([^=]+)(?:=(.*))?$/);
+  if (!match) {
+    fail("invalid fixture");
+  }
+  const nodeAddress = parseInteger(match[1], "fixture node address", 1, 0x7fff);
+  const name = (match[2] || "").trim();
+  return {
+    node_address: nodeAddress,
+    name,
+    element_count: 1,
+  };
+}
+
+function anyNonZero(buffer, start, length) {
+  for (let index = start; index < start + length; index += 1) {
+    if (buffer[index] !== 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseIntelHex(text) {
+  const bytes = new Map();
+  let upper = 0;
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+    if (!line.startsWith(":") || line.length < 11) {
+      throw new Error("invalid Intel HEX line");
+    }
+
+    const count = Number.parseInt(line.slice(1, 3), 16);
+    const offset = Number.parseInt(line.slice(3, 7), 16);
+    const type = Number.parseInt(line.slice(7, 9), 16);
+    const data = line.slice(9, 9 + count * 2);
+
+    if (type === 0x00) {
+      const base = upper + offset;
+      for (let index = 0; index < count; index += 1) {
+        bytes.set(base + index, Number.parseInt(data.slice(index * 2, index * 2 + 2), 16));
+      }
+    } else if (type === 0x01) {
+      break;
+    } else if (type === 0x04) {
+      upper = Number.parseInt(data, 16) << 16;
+    }
+  }
+
+  if (bytes.size < CAPTURE_LENGTH) {
+    throw new Error(`capture payload too short: ${bytes.size} bytes`);
+  }
+
+  const addresses = Array.from(bytes.keys()).sort((a, b) => a - b);
+  const start = addresses[0];
+  const buffer = Buffer.alloc(addresses[addresses.length - 1] - start + 1);
+  for (const [address, byte] of bytes) {
+    buffer[address - start] = byte;
+  }
+  return buffer.subarray(0, CAPTURE_LENGTH);
+}
+
+function loadCapture(capturePath) {
+  const raw = fs.readFileSync(capturePath);
+  const asText = raw.toString("utf8", 0, Math.min(raw.length, 32));
+
+  if (asText.trimStart().startsWith(":")) {
+    return parseIntelHex(raw.toString("utf8"));
+  }
+  if (raw.length < CAPTURE_LENGTH) {
+    throw new Error(`capture payload too short: ${raw.length} bytes`);
+  }
+  return raw.subarray(0, CAPTURE_LENGTH);
+}
+
+function decodeCapture(buffer) {
+  if (buffer.readUInt32LE(0) !== MAGIC || buffer.readUInt16LE(6) !== CAPTURE_LENGTH) {
+    fail("capture block is not valid");
+  }
+
+  const netKeyPresent = anyNonZero(buffer, 16, 16);
+  const deviceKeyPresent = anyNonZero(buffer, 32, 16);
+  const appKeyPresent = anyNonZero(buffer, 48, 16);
+  if (!netKeyPresent || !appKeyPresent) {
+    fail("capture does not contain both NetKey and AppKey; cannot create a usable join-state source");
+  }
+
+  return {
+    seenMask: buffer.readUInt32LE(8),
+    recordCount: buffer.readUInt32LE(12),
+    netKey: buffer.subarray(16, 32).toString("hex"),
+    deviceKeyPresent,
+    appKey: buffer.subarray(48, 64).toString("hex"),
+    netIdx: buffer.readUInt16LE(64),
+    appNetIdx: buffer.readUInt16LE(66),
+    appIdx: buffer.readUInt16LE(68),
+    capturedNodeAddress: buffer.readUInt16LE(70),
+    ivIndex: buffer.readUInt32LE(72),
+    flags: buffer.readUInt8(76),
+  };
+}
+
+function writeJson0600(outputPath, payload) {
+  const absolute = path.resolve(outputPath);
+  const directory = path.dirname(absolute);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const tmp = path.join(directory, `.dk-capture-to-state-join.${process.pid}.${Date.now()}.json`);
+  fs.writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+  fs.chmodSync(tmp, 0o600);
+  fs.renameSync(tmp, absolute);
+  fs.chmodSync(absolute, 0o600);
+}
+
+const args = process.argv.slice(2);
+let capturePath = "";
+let outputPath = "";
+let meshUuid = "sidus-captured-mesh";
+let sequenceNext = 1;
+const fixtures = [];
+
+for (let index = 0; index < args.length; index += 1) {
+  const arg = args[index];
+  if (arg === "--capture") {
+    capturePath = args[++index] || "";
+  } else if (arg === "--output") {
+    outputPath = args[++index] || "";
+  } else if (arg === "--fixture") {
+    fixtures.push(parseFixture(args[++index] || ""));
+  } else if (arg === "--mesh-uuid") {
+    meshUuid = args[++index] || "";
+  } else if (arg === "--sequence-next") {
+    sequenceNext = parseInteger(args[++index] || "", "sequence-next", 0, 0x00fffffe);
+  } else if (arg === "--help" || arg === "-h") {
+    usage();
+  } else {
+    usage();
+  }
+}
+
+if (!capturePath || !outputPath || fixtures.length === 0 || !meshUuid) {
+  usage();
+}
+
+const occupied = new Set();
+for (const fixture of fixtures) {
+  if (occupied.has(fixture.node_address)) {
+    fail(`duplicate fixture node address ${fixture.node_address}`);
+  }
+  occupied.add(fixture.node_address);
+  if (!fixture.name) {
+    fixture.name = `fixture-${fixture.node_address}`;
+  }
+}
+
+let decoded;
+try {
+  decoded = decodeCapture(loadCapture(capturePath));
+} catch (error) {
+  fail(error.message);
+}
+
+const payload = {
+  mesh: {
+    uuid: meshUuid,
+    net_key: decoded.netKey,
+    app_key: decoded.appKey,
+    iv_index: decoded.ivIndex,
+  },
+  fixtures,
+  runtime: {
+    sequence_next: sequenceNext,
+  },
+  capture: {
+    source: "nrf52840-dk-sidus-join-probe",
+    net_idx: decoded.netIdx,
+    app_net_idx: decoded.appNetIdx,
+    app_idx: decoded.appIdx,
+    captured_node_address: decoded.capturedNodeAddress,
+    key_refresh_flags: decoded.flags,
+  },
+};
+
+writeJson0600(outputPath, payload);
+
+console.log(`wrote state-join source ${outputPath}`);
+console.log(`fixtures ${fixtures.length}`);
+for (const fixture of fixtures) {
+  console.log(`${fixture.name}\t${fixture.node_address}\tcontrol-only`);
+}
+console.log(`capture records ${decoded.recordCount}`);
+console.log(`captured dummy node ${decoded.capturedNodeAddress || "unknown"}`);
+console.log(`captured device key ${decoded.deviceKeyPresent ? "yes" : "no"}`);

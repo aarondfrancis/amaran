@@ -1,0 +1,79 @@
+#!/bin/sh
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+
+usage() {
+  cat >&2 <<'USAGE'
+usage:
+  scripts/dk-sidus-attempt prepare [--scan] [--timeout <sec>]
+  scripts/dk-sidus-attempt read [--json] [--output <capture.hex>]
+  scripts/dk-sidus-attempt convert --capture <capture.hex> --output <join.json> --fixture <node-address[=name]> [--fixture <node-address[=name]> ...]
+
+Sidus join-probe operator helper for the nRF52840 DK. It prints only redacted
+capture metadata; raw capture and join JSON files are key-bearing if Sidus
+provisioning succeeds.
+
+Commands:
+  prepare   Clear the DK capture block before a Sidus attempt. With --scan,
+            verify the DK is advertising PB-GATT, then clear again so the scan
+            does not leave GATT debug breadcrumbs.
+  read      Read and decode the current DK capture after Sidus finishes.
+  convert   Convert a full NetKey/AppKey capture into state-join source JSON.
+USAGE
+  exit 2
+}
+
+COMMAND="${1:-}"
+[ -n "$COMMAND" ] || usage
+shift
+
+case "$COMMAND" in
+  prepare)
+    SCAN=0
+    TIMEOUT=10
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --scan)
+          SCAN=1
+          shift
+          ;;
+        --timeout)
+          [ "$#" -ge 2 ] || usage
+          TIMEOUT="$2"
+          shift 2
+          ;;
+        --help|-h)
+          usage
+          ;;
+        *)
+          usage
+          ;;
+      esac
+    done
+
+    "$ROOT/scripts/read-dk-capture" --clear
+    if [ "$SCAN" -eq 1 ]; then
+      "$ROOT/bin/amaran" provision-scan --json --timeout "$TIMEOUT"
+      "$ROOT/scripts/read-dk-capture" --clear
+    fi
+    echo "DK ready for Sidus. In Sidus Link, add the fake amaran/Sidus BT fixture, then run:"
+    echo "  scripts/dk-sidus-attempt read --output /private/tmp/amaran-dk-sidus-attempt.hex"
+    ;;
+
+  read)
+    "$ROOT/scripts/read-dk-capture" "$@"
+    ;;
+
+  convert)
+    "$ROOT/scripts/dk-capture-to-state-join" "$@"
+    ;;
+
+  --help|-h|help)
+    usage
+    ;;
+
+  *)
+    usage
+    ;;
+esac

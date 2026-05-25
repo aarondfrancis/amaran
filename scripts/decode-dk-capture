@@ -1,0 +1,334 @@
+#!/usr/bin/env node
+
+delete process.env.NO_COLOR;
+
+const fs = require("fs");
+
+const CAPTURE_BASE_LENGTH = 96;
+const CAPTURE_EVENT_RING_OFFSET = 96;
+const CAPTURE_EVENT_RING_ENTRY_SIZE_V1 = 8;
+const CAPTURE_EVENT_RING_ENTRY_SIZE_V2 = 16;
+const MAGIC = 0x414d4341;
+
+const seenBits = [
+  [0x00000001, "provisioning"],
+  [0x00000002, "appkey"],
+  [0x00000004, "netkey-import"],
+  [0x00000008, "appkey-import"],
+  [0x00000010, "devicekey-import"],
+];
+
+const debugBits = [
+  [0x00000001, "gatt-connected"],
+  [0x00000002, "gatt-disconnected"],
+  [0x00000004, "gatt-write"],
+  [0x00000008, "gatt-ccc-write"],
+  [0x00000010, "gatt-notify"],
+  [0x00000020, "proxy-prov-msg"],
+  [0x00000040, "pb-gatt-recv"],
+  [0x00000080, "pb-gatt-start"],
+  [0x00000100, "pb-gatt-close"],
+  [0x00000200, "pb-gatt-timeout"],
+  [0x00000400, "prov-recv"],
+  [0x00000800, "prov-link-open"],
+  [0x00001000, "prov-link-close"],
+  [0x00002000, "prov-error"],
+  [0x00004000, "invite"],
+  [0x00008000, "start"],
+  [0x00010000, "pub-key"],
+  [0x00020000, "confirm"],
+  [0x00040000, "random"],
+  [0x00080000, "data"],
+  [0x00100000, "prov-fail"],
+  [0x00200000, "provee-link-open"],
+  [0x00400000, "provee-link-close"],
+  [0x00800000, "complete"],
+  [0x01000000, "pub-key-sent"],
+  [0x02000000, "pub-key-send-error"],
+  [0x04000000, "dhkey-ready"],
+  [0x08000000, "confirm-deferred"],
+  [0x10000000, "proxy-connected"],
+  [0x20000000, "proxy-disconnected"],
+  [0x40000000, "proxy-write"],
+  [0x80000000, "proxy-notify"],
+];
+
+const eventNames = {
+  1: "gatt-connected",
+  2: "gatt-disconnected",
+  3: "gatt-write",
+  4: "gatt-ccc-write",
+  5: "gatt-notify",
+  6: "proxy-prov-msg",
+  7: "pb-gatt-recv",
+  8: "pb-gatt-start",
+  9: "pb-gatt-close",
+  10: "pb-gatt-timeout",
+  11: "prov-recv",
+  12: "prov-link-open",
+  13: "prov-link-close",
+  14: "prov-error",
+  15: "invite",
+  16: "start",
+  17: "remote-pub-key",
+  18: "confirm",
+  19: "random",
+  20: "data",
+  21: "complete",
+  22: "provee-link-open",
+  23: "provee-link-close",
+  24: "prov-fail",
+  25: "pub-key-sent",
+  26: "pub-key-send-error",
+  27: "dhkey-ready",
+  28: "confirm-deferred",
+  29: "local-pub-key",
+  30: "proxy-connected",
+  31: "proxy-disconnected",
+  32: "proxy-write",
+  33: "proxy-msg",
+  34: "proxy-notify",
+  35: "proxy-ccc-write",
+  36: "proxy-role",
+};
+
+function usage() {
+  console.error("usage: scripts/decode-dk-capture [--json] <capture.hex|capture.bin>");
+  process.exit(2);
+}
+
+function hex(value, width) {
+  return `0x${value.toString(16).padStart(width, "0")}`;
+}
+
+function namesFor(mask, table) {
+  return table.filter(([bit]) => (mask & bit) !== 0).map(([, name]) => name);
+}
+
+function anyNonZero(buffer, start, length) {
+  for (let i = start; i < start + length; i += 1) {
+    if (buffer[i] !== 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseIntelHex(text) {
+  const bytes = new Map();
+  let upper = 0;
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+    if (!line.startsWith(":") || line.length < 11) {
+      throw new Error("invalid Intel HEX line");
+    }
+
+    const count = Number.parseInt(line.slice(1, 3), 16);
+    const offset = Number.parseInt(line.slice(3, 7), 16);
+    const type = Number.parseInt(line.slice(7, 9), 16);
+    const data = line.slice(9, 9 + count * 2);
+
+    if (type === 0x00) {
+      const base = upper + offset;
+      for (let index = 0; index < count; index += 1) {
+        bytes.set(base + index, Number.parseInt(data.slice(index * 2, index * 2 + 2), 16));
+      }
+    } else if (type === 0x01) {
+      break;
+    } else if (type === 0x04) {
+      upper = Number.parseInt(data, 16) << 16;
+    }
+  }
+
+  if (bytes.size < CAPTURE_BASE_LENGTH) {
+    throw new Error(`capture payload too short: ${bytes.size} bytes`);
+  }
+
+  const addresses = Array.from(bytes.keys()).sort((a, b) => a - b);
+  const start = addresses[0];
+  const buffer = Buffer.alloc(addresses[addresses.length - 1] - start + 1);
+  for (const [address, byte] of bytes) {
+    buffer[address - start] = byte;
+  }
+  return buffer;
+}
+
+function loadCapture(path) {
+  const raw = fs.readFileSync(path);
+  const asText = raw.toString("utf8", 0, Math.min(raw.length, 32));
+
+  if (asText.trimStart().startsWith(":")) {
+    return parseIntelHex(raw.toString("utf8"));
+  }
+  if (raw.length < CAPTURE_BASE_LENGTH) {
+    throw new Error(`capture payload too short: ${raw.length} bytes`);
+  }
+  return raw;
+}
+
+function decode(buffer) {
+  const seenMask = buffer.readUInt32LE(8);
+  const debugMask = buffer.readUInt32LE(77);
+  const lastValue = buffer.readUInt16LE(83);
+  const startAlgorithm = buffer.readUInt8(91);
+  const startPublicKey = buffer.readUInt8(92);
+  const startAuthMethod = buffer.readUInt8(93);
+
+  const decoded = {
+    valid: buffer.readUInt32LE(0) === MAGIC &&
+      buffer.readUInt16LE(6) >= CAPTURE_BASE_LENGTH &&
+      buffer.length >= buffer.readUInt16LE(6),
+    magic: hex(buffer.readUInt32LE(0), 8),
+    version: buffer.readUInt16LE(4),
+    length: buffer.readUInt16LE(6),
+    seen_mask: hex(seenMask, 8),
+    seen: namesFor(seenMask, seenBits),
+    records: buffer.readUInt32LE(12),
+    keys_present: {
+      net_key: anyNonZero(buffer, 16, 16),
+      device_key: anyNonZero(buffer, 32, 16),
+      app_key: anyNonZero(buffer, 48, 16),
+    },
+    mesh: {
+      net_idx: buffer.readUInt16LE(64),
+      app_net_idx: buffer.readUInt16LE(66),
+      app_idx: buffer.readUInt16LE(68),
+      node_address: hex(buffer.readUInt16LE(70), 4),
+      iv_index: buffer.readUInt32LE(72),
+      key_refresh_flags: hex(buffer.readUInt8(76), 2),
+    },
+    debug: {
+      mask: hex(debugMask, 8),
+      seen: namesFor(debugMask, debugBits),
+      last_event: {
+        code: buffer.readUInt8(81),
+        name: eventNames[buffer.readUInt8(81)] || "none",
+        value: lastValue,
+        value_hex: hex(lastValue, 4),
+      },
+      count: buffer.readUInt32LE(85),
+      capabilities: {
+        algorithm_bitmap: hex(buffer.readUInt8(82), 2),
+        algorithms: namesFor(buffer.readUInt8(82), [
+          [0x01, "cmac-aes128"],
+          [0x02, "hmac-sha256"],
+        ]),
+        public_key: buffer.readUInt8(89) === 0 ? "no-oob" : "oob",
+        oob_type: hex(buffer.readUInt8(90), 2),
+      },
+      start: {
+        algorithm: startAlgorithm === 0 ? "cmac-aes128" : startAlgorithm === 1 ? "hmac-sha256" : `unknown-${startAlgorithm}`,
+        public_key: startPublicKey === 0 ? "no-oob" : startPublicKey === 1 ? "oob" : `unknown-${startPublicKey}`,
+        auth_method: startAuthMethod,
+        auth_method_name: ["no-oob", "static-oob", "output-oob", "input-oob"][startAuthMethod] || `unknown-${startAuthMethod}`,
+        auth_action: buffer.readUInt8(94),
+        auth_size: buffer.readUInt8(95),
+      },
+    },
+  };
+
+  const declaredLength = buffer.readUInt16LE(6);
+  if (declaredLength >= CAPTURE_EVENT_RING_OFFSET + 8 &&
+      buffer.length >= CAPTURE_EVENT_RING_OFFSET + 8) {
+    const eventCount = buffer.readUInt32LE(CAPTURE_EVENT_RING_OFFSET);
+    const nextPos = buffer.readUInt8(CAPTURE_EVENT_RING_OFFSET + 4);
+    const declaredCapacity = buffer.readUInt8(CAPTURE_EVENT_RING_OFFSET + 5);
+    const ringBytes = Math.max(0, Math.min(buffer.length, declaredLength) - (CAPTURE_EVENT_RING_OFFSET + 8));
+    const entrySize = ringBytes >= declaredCapacity * CAPTURE_EVENT_RING_ENTRY_SIZE_V2
+      ? CAPTURE_EVENT_RING_ENTRY_SIZE_V2
+      : CAPTURE_EVENT_RING_ENTRY_SIZE_V1;
+    const capacity = Math.min(declaredCapacity, Math.floor(ringBytes / entrySize));
+    const entries = [];
+    for (let index = 0; index < capacity; index += 1) {
+      const ringIndex = (nextPos + index) % capacity;
+      const offset = CAPTURE_EVENT_RING_OFFSET + 8 + ringIndex * entrySize;
+      const code = buffer.readUInt8(offset);
+      const value = buffer.readUInt16LE(offset + 2);
+      const count = buffer.readUInt32LE(offset + 4);
+      if (count === 0) {
+        continue;
+      }
+      const uptimeMs = entrySize >= CAPTURE_EVENT_RING_ENTRY_SIZE_V2
+        ? buffer.readUInt32LE(offset + 8)
+        : null;
+      const fingerprint = entrySize >= CAPTURE_EVENT_RING_ENTRY_SIZE_V2
+        ? buffer.readUInt32LE(offset + 12)
+        : 0;
+      entries.push({
+        count,
+        code,
+        name: eventNames[code] || `unknown-${code}`,
+        value,
+        value_hex: hex(value, 4),
+        uptime_ms: uptimeMs,
+        fingerprint: hex(fingerprint, 8),
+      });
+    }
+    entries.sort((left, right) => left.count - right.count);
+    let firstUptime = null;
+    let previousUptime = null;
+    for (const event of entries) {
+      if (event.uptime_ms === null) {
+        continue;
+      }
+      if (firstUptime === null) {
+        firstUptime = event.uptime_ms;
+      }
+      event.delta_ms = event.uptime_ms - firstUptime;
+      event.since_previous_ms = previousUptime === null ? 0 : event.uptime_ms - previousUptime;
+      previousUptime = event.uptime_ms;
+    }
+    decoded.event_trace = {
+      count: eventCount,
+      capacity,
+      next_pos: nextPos,
+      entry_size: entrySize,
+      events: entries,
+    };
+  }
+
+  return decoded;
+}
+
+function printText(decoded) {
+  console.log(`valid=${decoded.valid ? "yes" : "no"} magic=${decoded.magic} version=${decoded.version} length=${decoded.length}`);
+  console.log(`seen=${decoded.seen.length ? decoded.seen.join(",") : "none"} records=${decoded.records}`);
+  console.log(`keys_present net=${decoded.keys_present.net_key ? "yes" : "no"} device=${decoded.keys_present.device_key ? "yes" : "no"} app=${decoded.keys_present.app_key ? "yes" : "no"}`);
+  console.log(`mesh net_idx=${decoded.mesh.net_idx} app_net_idx=${decoded.mesh.app_net_idx} app_idx=${decoded.mesh.app_idx} node=${decoded.mesh.node_address} iv=${decoded.mesh.iv_index} flags=${decoded.mesh.key_refresh_flags}`);
+  console.log(`debug=${decoded.debug.seen.length ? decoded.debug.seen.join(",") : "none"} count=${decoded.debug.count}`);
+  console.log(`last_event=${decoded.debug.last_event.name}(${decoded.debug.last_event.code}) value=${decoded.debug.last_event.value_hex}`);
+  console.log(`capabilities algorithms=${decoded.debug.capabilities.algorithms.length ? decoded.debug.capabilities.algorithms.join(",") : "none"} public_key=${decoded.debug.capabilities.public_key} oob_type=${decoded.debug.capabilities.oob_type}`);
+  console.log(`start algorithm=${decoded.debug.start.algorithm} public_key=${decoded.debug.start.public_key} auth=${decoded.debug.start.auth_method_name} action=${decoded.debug.start.auth_action} size=${decoded.debug.start.auth_size}`);
+  if (decoded.event_trace) {
+    const events = decoded.event_trace.events.map((event) => (
+      `${event.count}:${event.name}=${event.value_hex}` +
+        (event.delta_ms === undefined ? "" : `@+${event.delta_ms}ms`) +
+        (event.since_previous_ms === undefined ? "" : `/+${event.since_previous_ms}ms`) +
+        (event.fingerprint === "0x00000000" ? "" : `#${event.fingerprint}`)
+    ));
+    console.log(`event_trace count=${decoded.event_trace.count} events=${events.length ? events.join(",") : "none"}`);
+  }
+}
+
+const args = process.argv.slice(2);
+const json = args[0] === "--json";
+const path = json ? args[1] : args[0];
+if (!path || args.length > (json ? 2 : 1)) {
+  usage();
+}
+
+try {
+  const decoded = decode(loadCapture(path));
+  if (json) {
+    console.log(JSON.stringify(decoded, null, 2));
+  } else {
+    printText(decoded);
+  }
+} catch (error) {
+  console.error(`decode-dk-capture: ${error.message}`);
+  process.exit(1);
+}

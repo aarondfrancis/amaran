@@ -48,8 +48,8 @@ advertising identity that macOS CoreBluetooth cannot fully spoof.
 
 After the nRF52840 DK arrived, the DK path was validated:
 
-- macOS sees the board as SEGGER J-Link serial `1050234299`, board
-  `PCA10056`.
+- macOS sees the board as a SEGGER J-Link device; pass its serial with
+  `AMARAN_DK_SERIAL` or `--serial`.
 - `nrfutil device list` reports traits `devkit`, `jlink`, `seggerUsb`,
   `serialPorts`, and `usb`.
 - A local Zephyr workspace under ignored `.zephyrproject/` can build and flash

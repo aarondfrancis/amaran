@@ -1,0 +1,114 @@
+#!/bin/sh
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+SERIAL="${AMARAN_DK_SERIAL:-}"
+ELF="$ROOT/.zephyr-build/sidus-join-probe/zephyr/zephyr.elf"
+NM="${AMARAN_ARM_NM:-arm-zephyr-eabi-nm}"
+OUTPUT=""
+JSON=0
+CLEAR=0
+
+usage() {
+  cat >&2 <<'USAGE'
+usage: scripts/read-dk-capture [--json] [--clear] [--serial <sn>] [--elf <zephyr.elf>] [--output <capture.hex>]
+
+Reads the nRF52840 DK Sidus join-probe capture block and decodes only redacted
+metadata. The raw output file may contain mesh keys if capture succeeded; keep
+it private and do not commit it.
+
+  --clear        Write the capture clear marker, reset the DK, then read/decode
+                 the freshly initialized block. Use before a new Sidus attempt,
+                 not after one that may have captured keys.
+
+Set AMARAN_DK_SERIAL or pass --serial <sn>. Set AMARAN_ARM_NM if
+arm-zephyr-eabi-nm is not on PATH.
+USAGE
+  exit 2
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --json)
+      JSON=1
+      shift
+      ;;
+    --clear)
+      CLEAR=1
+      shift
+      ;;
+    --serial)
+      [ "$#" -ge 2 ] || usage
+      SERIAL="$2"
+      shift 2
+      ;;
+    --elf)
+      [ "$#" -ge 2 ] || usage
+      ELF="$2"
+      shift 2
+      ;;
+    --output)
+      [ "$#" -ge 2 ] || usage
+      OUTPUT="$2"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
+
+if [ -z "$SERIAL" ]; then
+  echo "read-dk-capture: pass --serial <sn> or set AMARAN_DK_SERIAL" >&2
+  exit 1
+fi
+
+NM_PATH="$(command -v "$NM" 2>/dev/null || true)"
+[ -n "$NM_PATH" ] || {
+  echo "read-dk-capture: nm not found or not executable: $NM" >&2
+  exit 1
+}
+[ -f "$ELF" ] || {
+  echo "read-dk-capture: Zephyr ELF not found: $ELF" >&2
+  exit 1
+}
+
+SYMBOL="$("$NM_PATH" -S "$ELF" | awk '$4 == "amaran_capture_state" { print $1, $2; found=1 } END { if (!found) exit 1 }')" || {
+  echo "read-dk-capture: amaran_capture_state symbol not found in $ELF" >&2
+  exit 1
+}
+ADDRESS="0x$(printf '%s\n' "$SYMBOL" | awk '{ print $1 }')"
+SIZE_HEX="$(printf '%s\n' "$SYMBOL" | awk '{ print $2 }')"
+BYTES="$(printf "%d" "0x$SIZE_HEX")"
+
+if [ -z "$OUTPUT" ]; then
+  TMP_CAPTURE="$(mktemp /private/tmp/amaran-dk-capture.XXXXXX)"
+  rm -f "$TMP_CAPTURE"
+  OUTPUT="$TMP_CAPTURE.hex"
+fi
+umask 077
+
+if [ "$CLEAR" -eq 1 ]; then
+  nrfutil device write --serial-number "$SERIAL" --address "$ADDRESS" --value 0x414d4343 --direct >/dev/null
+  nrfutil device reset --serial-number "$SERIAL" >/dev/null
+  sleep 1
+fi
+
+nrfutil device read \
+  --serial-number "$SERIAL" \
+  --address "$ADDRESS" \
+  --bytes "$BYTES" \
+  --direct \
+  --to-file "$OUTPUT" >/dev/null
+chmod 600 "$OUTPUT"
+
+if [ "$JSON" -eq 1 ]; then
+  "$ROOT/scripts/decode-dk-capture" --json "$OUTPUT"
+else
+  echo "capture_file=$OUTPUT"
+  echo "capture_address=$ADDRESS"
+  "$ROOT/scripts/decode-dk-capture" "$OUTPUT"
+fi

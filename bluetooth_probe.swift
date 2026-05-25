@@ -1324,6 +1324,9 @@ final class ProbeOptions {
     var segmentAckRetryDelay: TimeInterval = 0.75
     var storeConfigCompositionData = false
     var confirmReset = false
+    var advertisementCapturePath: String?
+    var discoverAllServices = false
+    var readCharacteristics = false
     var configurationError: String?
 
     init(arguments: [String]) {
@@ -1344,6 +1347,20 @@ final class ProbeOptions {
                 } else {
                     index += 1
                 }
+            case "--advertisement-capture":
+                if index + 1 < arguments.count {
+                    advertisementCapturePath = (arguments[index + 1] as NSString).expandingTildeInPath
+                    index += 2
+                } else {
+                    configurationError = "--advertisement-capture requires a file path"
+                    index += 1
+                }
+            case "--discover-all-services":
+                discoverAllServices = true
+                index += 1
+            case "--read-characteristics":
+                readCharacteristics = true
+                index += 1
             case "--timeout":
                 if index + 1 < arguments.count, let value = Double(arguments[index + 1]) {
                     timeout = max(1, value)
@@ -1688,6 +1705,10 @@ final class ProbeOptions {
             default:
                 index += 1
             }
+        }
+
+        if let advertisementCapturePath, FileManager.default.fileExists(atPath: advertisementCapturePath) {
+            configurationError = "advertisement capture file already exists at \(advertisementCapturePath)"
         }
 
         if joinCaptureRequested, configurationError == nil {
@@ -2125,6 +2146,7 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
     private var manager: CBCentralManager?
     private var selectedPeripheral: CBPeripheral?
     private var pendingCharacteristicServices = Set<String>()
+    private var pendingCharacteristicReads = Set<String>()
     private var discoveries: [String: [String: Any]] = [:]
     private var centralState = "unknown"
     private var startedAt = Date()
@@ -2167,6 +2189,7 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
     private var liveProvisioningWriteType = "none"
     private var liveProvisioningProxySegmentsWritten = 0
     private var liveProvisioningProxySegmentLengths: [Int] = []
+    private var advertisementCapturesByPeripheralID: [String: [String: Any]] = [:]
 
     init(options: ProbeOptions) {
         self.options = options
@@ -2226,7 +2249,7 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
         updateDiscovery(peripheral) { entry in
             entry["connected"] = true
         }
-        peripheral.discoverServices([meshProxyService, meshProvisioningService])
+        peripheral.discoverServices(options.discoverAllServices ? nil : [meshProxyService, meshProvisioningService])
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -2283,11 +2306,16 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
                     } else if characteristic.uuid == options.writeDataOutUUID {
                         proxyDataOutCharacteristic = characteristic
                     }
-                    return [
+                    var characteristicEntry: [String: Any] = [
                         "uuid": cbuuidString(characteristic.uuid),
                         "properties": characteristicProperties(characteristic.properties),
                         "role": characteristicRole(characteristic.uuid),
                     ]
+                    if options.readCharacteristics && characteristic.properties.contains(.read) {
+                        pendingCharacteristicReads.insert(characteristicKey(service: service, characteristic: characteristic))
+                        characteristicEntry["read_pending"] = true
+                    }
+                    return characteristicEntry
                 }
             }
             services.removeAll { ($0["uuid"] as? String) == serviceID }
@@ -2297,16 +2325,14 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
             }
         }
 
-        pendingCharacteristicServices.remove(serviceID)
-        if pendingCharacteristicServices.isEmpty {
-            if options.nativeProvisioningRun != nil {
-                startLiveProvisioningIfReady(peripheral)
-            } else if options.hasProxyWrite {
-                startProxyWriteIfReady(peripheral)
-            } else {
-                finish(ok: true, error: nil)
+        if options.readCharacteristics {
+            for characteristic in service.characteristics ?? [] where characteristic.properties.contains(.read) {
+                peripheral.readValue(for: characteristic)
             }
         }
+
+        pendingCharacteristicServices.remove(serviceID)
+        continueAfterDiscoveryIfReady(peripheral)
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
@@ -2346,6 +2372,14 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        let readKey = characteristicKey(characteristic: characteristic)
+        if pendingCharacteristicReads.contains(readKey) {
+            updateReadValue(peripheral: peripheral, characteristic: characteristic, error: error)
+            pendingCharacteristicReads.remove(readKey)
+            continueAfterDiscoveryIfReady(peripheral)
+            return
+        }
+
         guard characteristic.uuid == options.writeDataOutUUID else {
             return
         }
@@ -2376,7 +2410,72 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
         case cbuuidString(meshProxyDataOut): return "proxyDataOut"
         case cbuuidString(meshProvisioningDataIn): return "provisioningDataIn"
         case cbuuidString(meshProvisioningDataOut): return "provisioningDataOut"
-        default: return "unknown"
+            default: return "unknown"
+        }
+    }
+
+    private func characteristicKey(service: CBService, characteristic: CBCharacteristic) -> String {
+        "\(cbuuidString(service.uuid))/\(cbuuidString(characteristic.uuid))"
+    }
+
+    private func characteristicKey(characteristic: CBCharacteristic) -> String {
+        guard let service = characteristic.service else {
+            return "unknown/\(cbuuidString(characteristic.uuid))"
+        }
+        return characteristicKey(service: service, characteristic: characteristic)
+    }
+
+    private func updateReadValue(peripheral: CBPeripheral, characteristic: CBCharacteristic, error: Error?) {
+        guard let service = characteristic.service else {
+            return
+        }
+        let serviceID = cbuuidString(service.uuid)
+        let characteristicID = cbuuidString(characteristic.uuid)
+
+        updateDiscovery(peripheral) { entry in
+            var services = entry["services"] as? [[String: Any]] ?? []
+            guard let serviceIndex = services.firstIndex(where: { ($0["uuid"] as? String) == serviceID }) else {
+                return
+            }
+
+            var serviceEntry = services[serviceIndex]
+            var characteristics = serviceEntry["characteristics"] as? [[String: Any]] ?? []
+            guard let characteristicIndex = characteristics.firstIndex(where: {
+                ($0["uuid"] as? String) == characteristicID
+            }) else {
+                return
+            }
+
+            var characteristicEntry = characteristics[characteristicIndex]
+            characteristicEntry.removeValue(forKey: "read_pending")
+            if let error {
+                characteristicEntry["read_error"] = error.localizedDescription
+            } else {
+                let bytes = Array(characteristic.value ?? Data())
+                characteristicEntry["read"] = [
+                    "length": bytes.count,
+                    "hex": NativeMeshCrypto.hex(bytes),
+                ]
+            }
+            characteristics[characteristicIndex] = characteristicEntry
+            serviceEntry["characteristics"] = characteristics
+            services[serviceIndex] = serviceEntry
+            entry["services"] = services.sorted { lhs, rhs in
+                (lhs["uuid"] as? String ?? "") < (rhs["uuid"] as? String ?? "")
+            }
+        }
+    }
+
+    private func continueAfterDiscoveryIfReady(_ peripheral: CBPeripheral) {
+        guard pendingCharacteristicServices.isEmpty && pendingCharacteristicReads.isEmpty else {
+            return
+        }
+        if options.nativeProvisioningRun != nil {
+            startLiveProvisioningIfReady(peripheral)
+        } else if options.hasProxyWrite {
+            startProxyWriteIfReady(peripheral)
+        } else {
+            finish(ok: true, error: nil)
         }
     }
 
@@ -2444,6 +2543,67 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
                 entry["proxy_network_match"] = proxyNetworkMatches
             }
         }
+        captureAdvertisement(
+            peripheral: peripheral,
+            advertisementData: advertisementData,
+            rssi: rssi,
+            proxyNetworkMatches: proxyNetworkMatches
+        )
+    }
+
+    private func captureAdvertisement(
+        peripheral: CBPeripheral,
+        advertisementData: [String: Any],
+        rssi: NSNumber,
+        proxyNetworkMatches: Bool
+    ) {
+        guard options.advertisementCapturePath != nil else {
+            return
+        }
+
+        let advertisedServices = Set(
+            (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []).map(cbuuidString)
+                + (advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data] ?? [:]).keys.map(cbuuidString)
+        ).sorted()
+        let serviceData = advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data] ?? [:]
+        var serviceDataHex: [String: String] = [:]
+        for (uuid, data) in serviceData {
+            serviceDataHex[cbuuidString(uuid)] = NativeMeshCrypto.hex(Array(data))
+        }
+        let advertisedName: Any
+        if let localName = advertisementData[CBAdvertisementDataLocalNameKey] as? String {
+            advertisedName = localName
+        } else if let peripheralName = peripheral.name {
+            advertisedName = peripheralName
+        } else {
+            advertisedName = NSNull()
+        }
+
+        var capture: [String: Any] = [
+            "id": peripheral.identifier.uuidString,
+            "name": advertisedName,
+            "rssi": rssi.intValue,
+            "advertised_services": advertisedServices,
+            "mesh_roles": meshRole(serviceUUIDs: advertisedServices),
+            "connectable": advertisementData[CBAdvertisementDataIsConnectable] as? Bool ?? NSNull(),
+            "service_data_hex": serviceDataHex,
+            "captured_at": isoTimestamp(),
+        ]
+
+        if let manufacturerData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data {
+            capture["manufacturer_data_hex"] = NativeMeshCrypto.hex(Array(manufacturerData))
+            capture["manufacturer_data_length"] = manufacturerData.count
+        } else {
+            capture["manufacturer_data_length"] = 0
+        }
+        if let provisioningData = serviceData[meshProvisioningService] {
+            capture["provisioning"] = NativeMeshProvisioning.provisioningServiceDataSummary(Array(provisioningData))
+        }
+        if options.requiredProxyNetworkId != nil {
+            capture["proxy_network_match"] = proxyNetworkMatches
+        }
+
+        advertisementCapturesByPeripheralID[peripheral.identifier.uuidString] = capture
     }
 
     private func startProxyWriteIfReady(_ peripheral: CBPeripheral) {
@@ -3674,11 +3834,18 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
             }
             data["native_provisioning"] = provisioning
         }
+        if let advertisementCapturePath = options.advertisementCapturePath {
+            data["advertisement_capture"] = [
+                "path": advertisementCapturePath,
+                "count": advertisementCapturesByPeripheralID.count,
+            ]
+        }
 
         var payload: [String: Any] = ["ok": ok, "data": data]
         if let error {
             payload["error"] = error
         }
+        writeAdvertisementCapture(ok: ok, error: error)
         writePayload(payload)
 
         DispatchQueue.main.async {
@@ -3691,6 +3858,31 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
             try writeJSONPayload(payload, to: options.outputPath)
         } catch {
             fputs("failed to write probe output: \(error.localizedDescription)\n", stderr)
+        }
+    }
+
+    private func writeAdvertisementCapture(ok: Bool, error: String?) {
+        guard let capturePath = options.advertisementCapturePath else {
+            return
+        }
+
+        var payload: [String: Any] = [
+            "ok": ok,
+            "captured_at": isoTimestamp(),
+            "central_state": centralState,
+            "scanned_services": options.scanServices.map(cbuuidString).sorted(),
+            "advertisements": advertisementCapturesByPeripheralID.values.sorted {
+                ($0["rssi"] as? Int ?? -999) > ($1["rssi"] as? Int ?? -999)
+            },
+        ]
+        if let error {
+            payload["error"] = error
+        }
+
+        do {
+            try writeSensitiveJSONPayload(payload, to: capturePath)
+        } catch {
+            fputs("failed to write advertisement capture: \(error.localizedDescription)\n", stderr)
         }
     }
 

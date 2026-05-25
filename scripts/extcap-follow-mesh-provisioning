@@ -1,0 +1,303 @@
+#!/usr/bin/env node
+
+const { spawn, spawnSync } = require("child_process");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const SHIM = "/private/tmp/amaran-extcap/nrfutil-ble-sniffer-shim";
+const CONTROL_SYNC = "T".charCodeAt(0);
+const CTRL_CMD_INIT = 0;
+const CTRL_CMD_SET = 1;
+const CTRL_CMD_ADD = 2;
+const CTRL_KEY_TYPE = 1;
+const CTRL_VALUE = 2;
+const KEY_FOLLOW_LE_ADDRESS = "7";
+
+function usage(exitCode = 2) {
+  console.error([
+    "usage: scripts/extcap-follow-mesh-provisioning --port <serial-port> --follow <ble-address> [--output <capture.pcap>]",
+    "",
+    "Launches the Nordic BLE sniffer extcap shim and drives its live toolbar",
+    "control pipe so following happens after the sniffer has seen the device.",
+  ].join("\n"));
+  process.exit(exitCode);
+}
+
+function parseArgs(argv) {
+  const options = {
+    output: `/private/tmp/amaran-extcap-follow-${timestamp()}.pcap`,
+    followType: null,
+    firmwareVersion: "4.1",
+    runSeconds: 300,
+    followAfterMs: 2500,
+    minFollowAfterMs: 4000,
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--port") {
+      options.port = argv[++index];
+    } else if (arg === "--follow") {
+      options.follow = argv[++index];
+    } else if (arg === "--output") {
+      options.output = argv[++index];
+    } else if (arg === "--firmware-version") {
+      options.firmwareVersion = argv[++index];
+    } else if (arg === "--run-seconds") {
+      options.runSeconds = Number(argv[++index]);
+    } else if (arg === "--follow-after-ms") {
+      options.followAfterMs = Number(argv[++index]);
+    } else if (arg === "--min-follow-after-ms") {
+      options.minFollowAfterMs = Number(argv[++index]);
+    } else if (arg === "-h" || arg === "--help") {
+      usage(0);
+    } else {
+      console.error(`unknown argument: ${arg}`);
+      usage();
+    }
+  }
+
+  if (
+    !options.port ||
+    !options.follow ||
+    !Number.isFinite(options.runSeconds) ||
+    options.runSeconds <= 0 ||
+    !Number.isFinite(options.minFollowAfterMs) ||
+    options.minFollowAfterMs < 0
+  ) {
+    usage();
+  }
+  options.follow = parseFollowAddress(options.follow);
+  options.extcapInterface = extcapInterface(options.port, options.firmwareVersion);
+  return options;
+}
+
+function timestamp() {
+  return new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "").replace("T", "-");
+}
+
+function parseFollowAddress(value) {
+  const parts = value.trim().split(/\s+/);
+  const type = (parts[1] || "public").toLowerCase();
+  if (!["public", "random"].includes(type)) {
+    throw new Error(`invalid BLE address type: ${type}`);
+  }
+  const stripped = parts[0].replace(/[^0-9a-f]/gi, "").toLowerCase();
+  if (!/^[0-9a-f]{12}$/.test(stripped)) {
+    throw new Error(`invalid BLE address: ${value}`);
+  }
+  const address = stripped.match(/../g).join(":");
+  return {
+    address,
+    type,
+    value: `${address} ${type}`,
+  };
+}
+
+function extcapInterface(port, firmwareVersion) {
+  if (/-\d+\.\d+(?:\.\d+)?$/.test(port)) {
+    return port;
+  }
+  return `${port}-${firmwareVersion}`;
+}
+
+function makeControlPacket(controlNumber, command, payload = "") {
+  const payloadBuffer = Buffer.from(payload, "utf8");
+  const length = payloadBuffer.length + 2;
+  const packet = Buffer.alloc(6 + payloadBuffer.length);
+  packet[0] = CONTROL_SYNC;
+  packet.writeUIntBE(length, 1, 3);
+  packet[4] = controlNumber;
+  packet[5] = command;
+  payloadBuffer.copy(packet, 6);
+  return packet;
+}
+
+function parseControlPackets(buffer, onPacket) {
+  let offset = 0;
+  while (offset + 6 <= buffer.length) {
+    if (buffer[offset] !== CONTROL_SYNC) {
+      offset += 1;
+      continue;
+    }
+    const length = buffer.readUIntBE(offset + 1, 3);
+    if (offset + 4 + length > buffer.length || length < 2) {
+      break;
+    }
+    const controlNumber = buffer[offset + 4];
+    const command = buffer[offset + 5];
+    const payload = buffer.subarray(offset + 6, offset + 4 + length);
+    onPacket({ controlNumber, command, payload });
+    offset += 4 + length;
+  }
+  return buffer.subarray(offset);
+}
+
+function mkfifo(fifoPath) {
+  const result = spawnSync("mkfifo", [fifoPath], { encoding: "utf8" });
+  if (result.status !== 0) {
+    throw new Error(result.stderr.trim() || `mkfifo failed for ${fifoPath}`);
+  }
+}
+
+function runDecoder(capturePath) {
+  const decoder = path.join(__dirname, "decode-nordic-pcap");
+  if (!fs.existsSync(capturePath)) {
+    return;
+  }
+  const env = { ...process.env, NO_COLOR: "1" };
+  delete env.FORCE_COLOR;
+  spawnSync(decoder, [capturePath], {
+    stdio: "inherit",
+    env,
+  });
+}
+
+function drainFd(readFd, onChunk) {
+  const chunk = Buffer.alloc(65536);
+  for (;;) {
+    let bytesRead = 0;
+    try {
+      bytesRead = fs.readSync(readFd, chunk, 0, chunk.length, null);
+    } catch (error) {
+      if (error.code === "EAGAIN") {
+        break;
+      }
+      throw error;
+    }
+    if (bytesRead <= 0) {
+      break;
+    }
+    onChunk(chunk.subarray(0, bytesRead));
+  }
+}
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+  if (!fs.existsSync(SHIM)) {
+    throw new Error(`${SHIM} does not exist; run nrfutil ble-sniffer bootstrap --extcap-dir /private/tmp/amaran-extcap`);
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "amaran-extcap-"));
+  const controlIn = path.join(tempDir, "control-in");
+  const controlOut = path.join(tempDir, "control-out");
+  const capturePipe = path.join(tempDir, "capture");
+  mkfifo(controlIn);
+  mkfifo(controlOut);
+  mkfifo(capturePipe);
+
+  const fifoFlags = fs.constants.O_RDWR | fs.constants.O_NONBLOCK;
+  const controlInFd = fs.openSync(controlIn, fifoFlags);
+  const controlOutFd = fs.openSync(controlOut, fifoFlags);
+  const captureFd = fs.openSync(capturePipe, fifoFlags);
+  const outputFd = fs.openSync(options.output, "w");
+
+  let child = null;
+  let pendingControlBytes = Buffer.alloc(0);
+  let followSent = false;
+  const startedAt = Date.now();
+
+  function writeControl(controlNumber, command, payload = "") {
+    fs.writeSync(controlInFd, makeControlPacket(controlNumber, command, payload));
+  }
+
+  function sendFollow(reason) {
+    if (followSent) {
+      return;
+    }
+    const delayRemaining = Math.max(0, options.minFollowAfterMs - (Date.now() - startedAt));
+    if (delayRemaining > 0) {
+      setTimeout(() => sendFollow(`${reason}; delayed for sniffer startup`), delayRemaining).unref();
+      return;
+    }
+    followSent = true;
+    console.log(`Sending extcap follow command for ${options.follow.value} (${reason})`);
+    writeControl(CTRL_KEY_TYPE, CTRL_CMD_SET, KEY_FOLLOW_LE_ADDRESS);
+    writeControl(CTRL_VALUE, CTRL_CMD_SET, options.follow.value);
+  }
+
+  const controlPoll = setInterval(() => {
+    drainFd(controlOutFd, (chunk) => {
+      pendingControlBytes = parseControlPackets(
+        Buffer.concat([pendingControlBytes, chunk]),
+        (packet) => {
+          if (packet.command !== CTRL_CMD_ADD) {
+            return;
+          }
+          const text = packet.payload.toString("utf8").replace(/\0/g, " ");
+          if (text.toLowerCase().includes(options.follow.address)) {
+            sendFollow("target appeared in extcap device list");
+          }
+        },
+      );
+    });
+  }, 100);
+  const capturePoll = setInterval(() => {
+    drainFd(captureFd, (chunk) => fs.writeSync(outputFd, chunk));
+  }, 50);
+
+  console.log(`Writing ${options.output}`);
+  console.log(`Waiting for ${options.follow.value}; start the Sidus add flow after the follow command prints.`);
+  child = spawn(SHIM, [
+    "--extcap-version", "4.0",
+    "--extcap-interface", options.extcapInterface,
+    "--capture",
+    "--fifo", capturePipe,
+    "--extcap-control-in", controlIn,
+    "--extcap-control-out", controlOut,
+    "--scan-follow-rsp",
+  ], {
+    stdio: "inherit",
+    detached: true,
+  });
+  const childExited = new Promise((resolve) => child.once("exit", resolve));
+
+  const followTimer = setTimeout(() => {
+    sendFollow("timed fallback after scan warmup");
+  }, options.followAfterMs);
+  const stopTimer = setTimeout(() => {
+    stopChild(child, "SIGINT");
+  }, options.runSeconds * 1000);
+
+  const stop = () => {
+    stopChild(child, "SIGINT");
+    setTimeout(() => stopChild(child, "SIGTERM"), 1500).unref();
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+
+  await childExited;
+  clearTimeout(followTimer);
+  clearTimeout(stopTimer);
+  clearInterval(controlPoll);
+  clearInterval(capturePoll);
+  drainFd(captureFd, (chunk) => fs.writeSync(outputFd, chunk));
+  fs.closeSync(controlInFd);
+  fs.closeSync(controlOutFd);
+  fs.closeSync(captureFd);
+  fs.closeSync(outputFd);
+
+  console.log("");
+  runDecoder(options.output);
+}
+
+function stopChild(child, signal) {
+  if (!child || child.killed) {
+    return;
+  }
+  try {
+    process.kill(-child.pid, signal);
+  } catch (_) {
+    try {
+      child.kill(signal);
+    } catch (_) {
+      // Process already exited.
+    }
+  }
+}
+
+main().catch((error) => {
+  console.error(`extcap-follow-mesh-provisioning: ${error.message}`);
+  process.exit(1);
+});

@@ -5,6 +5,13 @@ __pycache__/
 .env.*
 state.json
 *.state.json
+*.hex
+*.pcap
+*.pcapng
+*.capture.bin
+*.capture.json
+*.join.json
+amaran_probe_local_identity.h
 BluetoothProbe.app/Contents/MacOS/BluetoothProbe
 BluetoothProbe.app/Contents/_CodeSignature/
 .zephyrproject/

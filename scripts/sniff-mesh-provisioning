@@ -1,0 +1,233 @@
+#!/usr/bin/env node
+
+const { spawn, spawnSync } = require("child_process");
+const fs = require("fs");
+const path = require("path");
+
+function usage(exitCode = 2) {
+  console.error([
+    "usage: scripts/sniff-mesh-provisioning --port <serial-port> [--output <capture.pcap>]",
+    "       scripts/sniff-mesh-provisioning --port <serial-port> --follow <ble-address> [--output <capture.pcap>]",
+    "",
+    "Scans for Bluetooth Mesh Provisioning advertisements (0x1827), follows the",
+    "strongest target by BLE address, and writes a Nordic sniffer PCAP.",
+  ].join("\n"));
+  process.exit(exitCode);
+}
+
+function parseArgs(argv) {
+  const options = {
+    scanSeconds: 6,
+    followTimeoutMs: 300000,
+    output: `/private/tmp/amaran-provisioning-follow-${timestamp()}.pcap`,
+    scanOutput: `/private/tmp/amaran-provisioning-scan-${timestamp()}.pcap`,
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--port") {
+      options.port = argv[++index];
+    } else if (arg === "--output") {
+      options.output = argv[++index];
+    } else if (arg === "--scan-output") {
+      options.scanOutput = argv[++index];
+    } else if (arg === "--scan-seconds") {
+      options.scanSeconds = Number(argv[++index]);
+    } else if (arg === "--follow-timeout-ms") {
+      options.followTimeoutMs = Number(argv[++index]);
+    } else if (arg === "--follow") {
+      options.follow = argv[++index];
+    } else if (arg === "-h" || arg === "--help") {
+      usage(0);
+    } else {
+      console.error(`unknown argument: ${arg}`);
+      usage();
+    }
+  }
+
+  if (
+    !options.port ||
+    !Number.isFinite(options.scanSeconds) ||
+    options.scanSeconds <= 0 ||
+    !Number.isFinite(options.followTimeoutMs) ||
+    options.followTimeoutMs <= 0
+  ) {
+    usage();
+  }
+  return options;
+}
+
+function timestamp() {
+  return new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "").replace("T", "-");
+}
+
+function parseFollowAddress(address, fallbackType = "public") {
+  const parts = address.trim().split(/\s+/);
+  const requestedType = (parts[1] || fallbackType || "public").toLowerCase();
+  if (!["public", "random"].includes(requestedType)) {
+    throw new Error(`invalid BLE address type: ${requestedType}`);
+  }
+  const stripped = parts[0].replace(/[^0-9a-f]/gi, "").toLowerCase();
+  if (!/^[0-9a-f]{12}$/.test(stripped)) {
+    throw new Error(`invalid BLE address: ${address}`);
+  }
+  return {
+    address: stripped.match(/../g).join(":"),
+    type: requestedType,
+    followValue: `${stripped.match(/../g).join(":")} ${requestedType}`,
+  };
+}
+
+function runDecoderJson(capturePath) {
+  const decoder = path.join(__dirname, "decode-nordic-pcap");
+  const env = { ...process.env, NO_COLOR: "1" };
+  delete env.FORCE_COLOR;
+  const result = spawnSync(decoder, ["--json", capturePath], {
+    encoding: "utf8",
+    env,
+  });
+  if (result.status !== 0) {
+    throw new Error(result.stderr.trim() || `decoder exited ${result.status}`);
+  }
+  return JSON.parse(result.stdout);
+}
+
+function runDecoderText(capturePath) {
+  const decoder = path.join(__dirname, "decode-nordic-pcap");
+  const env = { ...process.env, NO_COLOR: "1" };
+  delete env.FORCE_COLOR;
+  spawnSync(decoder, [capturePath], {
+    stdio: "inherit",
+    env,
+  });
+}
+
+function startSniffer(args) {
+  return spawn("nrfutil", ["ble-sniffer", "sniff", ...args], {
+    stdio: "inherit",
+    detached: true,
+  });
+}
+
+function stopSniffer(child, signal = "SIGINT") {
+  if (!child || child.killed) {
+    return;
+  }
+  try {
+    process.kill(-child.pid, signal);
+  } catch (_) {
+    try {
+      child.kill(signal);
+    } catch (_) {
+      // Process already exited.
+    }
+  }
+}
+
+function waitForExit(child) {
+  return new Promise((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+}
+
+async function captureScan(options) {
+  console.log(`Scanning ${options.scanSeconds}s for Mesh Provisioning advertisements...`);
+  const child = startSniffer([
+    "--port", options.port,
+    "--only-advertising",
+    "--scan-follow-rsp",
+    "--timeout", String((options.scanSeconds * 1000) + 1000),
+    "--output-pcap-file", options.scanOutput,
+  ]);
+
+  const timer = setTimeout(() => {
+    stopSniffer(child, "SIGINT");
+    setTimeout(() => stopSniffer(child, "SIGTERM"), 1500).unref();
+  }, options.scanSeconds * 1000);
+  await waitForExit(child);
+  clearTimeout(timer);
+
+  if (!fs.existsSync(options.scanOutput)) {
+    throw new Error(`scan did not create ${options.scanOutput}`);
+  }
+  return runDecoderJson(options.scanOutput);
+}
+
+function chooseProvisioningTarget(summary) {
+  const targets = (summary.advertisement_stats || []).filter((target) => (
+    (target.service_uuids_16 || []).includes("1827") ||
+    (target.service_data_16 || []).includes("1827")
+  ));
+  targets.sort((left, right) => right.max_rssi - left.max_rssi);
+  return targets[0] || null;
+}
+
+function describeTarget(target) {
+  const services = Array.from(new Set([
+    ...(target.service_uuids_16 || []),
+    ...(target.service_data_16 || []).map((service) => `${service}:data`),
+  ]));
+  const names = (target.names || []).join("|");
+  return `${target.address} ${target.address_type || "unknown"} max_rssi=${target.max_rssi} packets=${target.packets} names=${names || "-"} services=${services.join(",") || "-"}`;
+}
+
+async function follow(options, address, addressType) {
+  const follow = parseFollowAddress(address, addressType);
+  console.log(`Following ${follow.address} ${follow.type}`);
+  console.log(`Writing ${options.output}`);
+  console.log("Start the Sidus add flow now. Press Ctrl-C here after Sidus finishes or fails.");
+
+  const child = startSniffer([
+    "--port", options.port,
+    "--follow", follow.followValue,
+    "--scan-follow-rsp",
+    "--timeout", String(options.followTimeoutMs),
+    "--output-pcap-file", options.output,
+  ]);
+
+  const stop = () => {
+    stopSniffer(child, "SIGINT");
+    setTimeout(() => stopSniffer(child, "SIGTERM"), 1500).unref();
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+
+  await waitForExit(child);
+  console.log("");
+  if (fs.existsSync(options.output)) {
+    runDecoderText(options.output);
+  }
+}
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+  let address = options.follow;
+  let addressType = null;
+  if (!address) {
+    const summary = await captureScan(options);
+    const target = chooseProvisioningTarget(summary);
+    if (!target) {
+      console.error("No Mesh Provisioning target (0x1827) found.");
+      const fallback = (summary.advertisement_stats || []).filter((entry) => (
+        (entry.service_uuids_16 || []).includes("1828") ||
+        (entry.service_data_16 || []).includes("1828")
+      )).slice(0, 5);
+      if (fallback.length) {
+        console.error("Visible Mesh Proxy targets (0x1828):");
+        for (const entry of fallback) {
+          console.error(`  ${describeTarget(entry)}`);
+        }
+      }
+      process.exit(1);
+    }
+    console.log(`Selected ${describeTarget(target)}`);
+    address = target.address;
+    addressType = target.address_type;
+  }
+  await follow(options, address, addressType);
+}
+
+main().catch((error) => {
+  console.error(`sniff-mesh-provisioning: ${error.message}`);
+  process.exit(1);
+});

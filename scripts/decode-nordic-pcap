@@ -1,0 +1,606 @@
+#!/usr/bin/env node
+
+const crypto = require("crypto");
+const fs = require("fs");
+
+const LINKTYPE_NORDIC_BLE = 272;
+const ACCESS_ADDRESS_ADV = "d6be898e";
+
+const PROVISIONING_TYPES = {
+  0x00: "invite",
+  0x01: "capabilities",
+  0x02: "start",
+  0x03: "public_key",
+  0x04: "input_complete",
+  0x05: "confirmation",
+  0x06: "random",
+  0x07: "data",
+  0x08: "complete",
+  0x09: "failed",
+};
+
+const ATT_OPCODES = {
+  0x01: "error_response",
+  0x02: "exchange_mtu_request",
+  0x03: "exchange_mtu_response",
+  0x08: "read_by_type_request",
+  0x09: "read_by_type_response",
+  0x0a: "read_request",
+  0x0b: "read_response",
+  0x10: "read_by_group_type_request",
+  0x11: "read_by_group_type_response",
+  0x12: "write_request",
+  0x13: "write_response",
+  0x1b: "handle_value_notification",
+  0x1d: "handle_value_indication",
+  0x1e: "handle_value_confirmation",
+  0x52: "write_command",
+};
+
+function usage() {
+  console.error("usage: scripts/decode-nordic-pcap [--json] <capture.pcap>");
+  process.exit(2);
+}
+
+function hex(buffer) {
+  return Buffer.from(buffer).toString("hex");
+}
+
+function bleAddress(buffer) {
+  return hex(Buffer.from(buffer).reverse());
+}
+
+function fingerprint(buffer) {
+  return crypto.createHash("sha256").update(buffer).digest("hex").slice(0, 16);
+}
+
+function readUInt32(buffer, offset, littleEndian) {
+  return littleEndian ? buffer.readUInt32LE(offset) : buffer.readUInt32BE(offset);
+}
+
+function parsePcap(path) {
+  const data = fs.readFileSync(path);
+  if (data.length < 24) {
+    throw new Error("pcap is too short");
+  }
+
+  const magic = data.readUInt32BE(0);
+  const littleEndian = magic === 0xd4c3b2a1;
+  if (magic !== 0xa1b2c3d4 && magic !== 0xd4c3b2a1) {
+    throw new Error("unsupported pcap magic");
+  }
+
+  const network = readUInt32(data, 20, littleEndian);
+  if (network !== LINKTYPE_NORDIC_BLE) {
+    throw new Error(`unsupported link type ${network}; expected ${LINKTYPE_NORDIC_BLE}`);
+  }
+
+  const records = [];
+  let offset = 24;
+  while (offset + 16 <= data.length) {
+    const tsSec = readUInt32(data, offset, littleEndian);
+    const tsUsec = readUInt32(data, offset + 4, littleEndian);
+    const includedLength = readUInt32(data, offset + 8, littleEndian);
+    const originalLength = readUInt32(data, offset + 12, littleEndian);
+    offset += 16;
+    if (offset + includedLength > data.length) {
+      break;
+    }
+    records.push({
+      ts_sec: tsSec,
+      ts_usec: tsUsec,
+      original_length: originalLength,
+      data: data.subarray(offset, offset + includedLength),
+    });
+    offset += includedLength;
+  }
+
+  return { records, littleEndian };
+}
+
+function parseNordicFrame(frame) {
+  if (frame.length < 7) {
+    return null;
+  }
+
+  const payloadLength = frame.readUInt16LE(1);
+  const protocolVersion = frame[3];
+  const packetCounter = frame.readUInt16LE(4);
+  const packetId = frame[6];
+  if (payloadLength + 7 !== frame.length || protocolVersion < 2) {
+    return null;
+  }
+
+  const payload = frame.subarray(7);
+  if ((packetId !== 0x02 && packetId !== 0x06) || payload.length < 10) {
+    return {
+      board_id: frame[0],
+      protocol_version: protocolVersion,
+      packet_counter: packetCounter,
+      packet_id: packetId,
+      payload_length: payloadLength,
+    };
+  }
+
+  const eventHeaderLength = payload[0];
+  if (eventHeaderLength < 10 || payload.length < eventHeaderLength) {
+    return null;
+  }
+
+  const flags = payload[1];
+  const channel = payload[2];
+  const rssi = -payload[3];
+  const eventCounter = payload.readUInt16LE(4);
+  const firmwareTimestamp = payload.readUInt32LE(6);
+  const ll = payload.subarray(eventHeaderLength);
+
+  return {
+    board_id: frame[0],
+    protocol_version: protocolVersion,
+    packet_counter: packetCounter,
+    packet_id: packetId,
+    packet_kind: packetId === 0x02 ? "advertising" : "data",
+    payload_length: payloadLength,
+    event_header_length: eventHeaderLength,
+    flags,
+    crc_ok: (flags & 0x01) !== 0,
+    direction: packetId === 0x06
+      ? ((flags & 0x02) !== 0 ? "central_to_peripheral" : "peripheral_to_central")
+      : null,
+    encrypted: packetId === 0x06 ? (flags & 0x04) !== 0 : false,
+    channel,
+    rssi,
+    event_counter: eventCounter,
+    firmware_timestamp_us: firmwareTimestamp,
+    ll,
+  };
+}
+
+function parseAdvertising(frame) {
+  const ll = frame.ll;
+  if (!ll || ll.length < 6) {
+    return null;
+  }
+  const accessAddress = hex(ll.subarray(0, 4));
+  if (accessAddress !== ACCESS_ADDRESS_ADV || ll.length < 8) {
+    return null;
+  }
+
+  const header0 = ll[4];
+  const header1 = ll[5];
+  const txAdd = (header0 & 0x40) !== 0 ? "random" : "public";
+  const rxAdd = (header0 & 0x80) !== 0 ? "random" : "public";
+  const pduType = header0 & 0x0f;
+  const length = header1 & 0x3f;
+  const payload = ll.subarray(6, 6 + length);
+  const out = {
+    pdu_type: pduType,
+    pdu_type_name: [
+      "adv_ind",
+      "adv_direct_ind",
+      "adv_nonconn_ind",
+      "scan_req",
+      "scan_rsp",
+      "connect_ind",
+      "adv_scan_ind",
+    ][pduType] || `unknown_${pduType}`,
+    length,
+  };
+
+  if ([0x00, 0x02, 0x04, 0x06].includes(pduType) && payload.length >= 6) {
+    out.adv_address = bleAddress(payload.subarray(0, 6));
+    out.adv_address_type = txAdd;
+    out.data_length = payload.length - 6;
+    const advData = payload.subarray(6);
+    out.name = advertisementName(advData);
+    out.service_uuids_16 = advertisementUuid16s(advData);
+    out.service_data_16 = advertisementServiceData16s(advData);
+  } else if (pduType === 0x05 && payload.length >= 34) {
+    out.initiator_address = bleAddress(payload.subarray(0, 6));
+    out.initiator_address_type = txAdd;
+    out.advertiser_address = bleAddress(payload.subarray(6, 12));
+    out.advertiser_address_type = rxAdd;
+    out.access_address = hex(payload.subarray(12, 16));
+    out.interval = payload.readUInt16LE(22);
+    out.latency = payload.readUInt16LE(24);
+    out.timeout = payload.readUInt16LE(26);
+    out.channel_map = hex(payload.subarray(28, 33));
+    out.hop_increment = payload[33] & 0x1f;
+    out.sleep_clock_accuracy = (payload[33] >> 5) & 0x07;
+  }
+
+  return out;
+}
+
+function advertisementName(advData) {
+  for (let offset = 0; offset + 1 < advData.length;) {
+    const length = advData[offset];
+    if (length === 0 || offset + 1 + length > advData.length) {
+      break;
+    }
+    const type = advData[offset + 1];
+    if (type === 0x08 || type === 0x09) {
+      return advData.subarray(offset + 2, offset + 1 + length).toString("utf8");
+    }
+    offset += 1 + length;
+  }
+  return null;
+}
+
+function advertisementUuid16s(advData) {
+  const uuids = [];
+  for (let offset = 0; offset + 1 < advData.length;) {
+    const length = advData[offset];
+    if (length === 0 || offset + 1 + length > advData.length) {
+      break;
+    }
+    const type = advData[offset + 1];
+    if (type === 0x02 || type === 0x03) {
+      for (let index = offset + 2; index + 1 < offset + 1 + length; index += 2) {
+        uuids.push(advData.readUInt16LE(index).toString(16).padStart(4, "0"));
+      }
+    }
+    offset += 1 + length;
+  }
+  return uuids;
+}
+
+function advertisementServiceData16s(advData) {
+  const serviceData = [];
+  for (let offset = 0; offset + 1 < advData.length;) {
+    const length = advData[offset];
+    if (length === 0 || offset + 1 + length > advData.length) {
+      break;
+    }
+    const type = advData[offset + 1];
+    if (type === 0x16 && length >= 3) {
+      serviceData.push(advData.readUInt16LE(offset + 2).toString(16).padStart(4, "0"));
+    }
+    offset += 1 + length;
+  }
+  return serviceData;
+}
+
+function parseDataPdu(frame) {
+  const ll = frame.ll;
+  if (!ll || ll.length < 6) {
+    return null;
+  }
+  const accessAddress = hex(ll.subarray(0, 4));
+  const header0 = ll[4];
+  const length = ll[5];
+  const llid = header0 & 0x03;
+  const payload = ll.subarray(6, 6 + length);
+  return {
+    access_address: accessAddress,
+    llid,
+    llid_name: llid === 1 ? "continuation" : llid === 2 ? "start_or_complete_l2cap" : llid === 3 ? "control" : "reserved",
+    length,
+    payload,
+  };
+}
+
+function parseAtt(direction, l2capPayload) {
+  if (l2capPayload.length < 1) {
+    return null;
+  }
+  const opcode = l2capPayload[0];
+  const out = {
+    direction,
+    opcode,
+    opcode_name: ATT_OPCODES[opcode] || `unknown_0x${opcode.toString(16)}`,
+    length: l2capPayload.length,
+  };
+  if ([0x12, 0x52, 0x1b, 0x1d].includes(opcode) && l2capPayload.length >= 3) {
+    out.handle = `0x${l2capPayload.readUInt16LE(1).toString(16).padStart(4, "0")}`;
+    out.value = l2capPayload.subarray(3);
+  }
+  return out;
+}
+
+function decodeCapture(path) {
+  const { records } = parsePcap(path);
+  const l2capReassembly = {
+    central_to_peripheral: null,
+    peripheral_to_central: null,
+  };
+  const proxyReassembly = {
+    central_to_peripheral: null,
+    peripheral_to_central: null,
+  };
+  const summary = {
+    path,
+    records: records.length,
+    nordic_packets: 0,
+    advertising_packets: 0,
+    data_packets: 0,
+    connect_indications: [],
+    advertisements: [],
+    advertisement_stats: [],
+    att_packets: 0,
+    provisioning_events: [],
+  };
+  const seenAdvertisements = new Set();
+  const advertisementStats = new Map();
+
+  records.forEach((record, index) => {
+    const nordic = parseNordicFrame(record.data);
+    if (!nordic) {
+      return;
+    }
+    summary.nordic_packets += 1;
+
+    if (nordic.packet_kind === "advertising") {
+      summary.advertising_packets += 1;
+      const adv = parseAdvertising(nordic);
+      if (adv) {
+        if (adv.pdu_type_name === "connect_ind" && adv.advertiser_address) {
+          summary.connect_indications.push({
+            packet_index: index,
+            ts_sec: record.ts_sec,
+            ts_usec: record.ts_usec,
+            crc_ok: nordic.crc_ok,
+            rssi: nordic.rssi,
+            initiator_address: adv.initiator_address,
+            initiator_address_type: adv.initiator_address_type,
+            advertiser_address: adv.advertiser_address,
+            advertiser_address_type: adv.advertiser_address_type,
+            access_address: adv.access_address,
+            interval: adv.interval,
+            latency: adv.latency,
+            timeout: adv.timeout,
+            channel_map: adv.channel_map,
+            hop_increment: adv.hop_increment,
+            sleep_clock_accuracy: adv.sleep_clock_accuracy,
+          });
+        } else if (adv.adv_address) {
+          const statKey = `${adv.adv_address}:${adv.adv_address_type}`;
+          const stat = advertisementStats.get(statKey) || {
+            address: adv.adv_address,
+            address_type: adv.adv_address_type,
+            names: new Set(),
+            service_uuids_16: new Set(),
+            service_data_16: new Set(),
+            packets: 0,
+            first_packet: index,
+            last_packet: index,
+            max_rssi: nordic.rssi,
+            min_rssi: nordic.rssi,
+          };
+          stat.packets += 1;
+          stat.last_packet = index;
+          stat.max_rssi = Math.max(stat.max_rssi, nordic.rssi);
+          stat.min_rssi = Math.min(stat.min_rssi, nordic.rssi);
+          if (adv.name) {
+            stat.names.add(adv.name);
+          }
+          for (const service of adv.service_uuids_16 || []) {
+            stat.service_uuids_16.add(service);
+          }
+          for (const service of adv.service_data_16 || []) {
+            stat.service_data_16.add(service);
+          }
+          advertisementStats.set(statKey, stat);
+
+          const key = `${adv.adv_address}:${adv.adv_address_type}:${adv.name || ""}:${adv.service_uuids_16.join(",")}:${adv.service_data_16.join(",")}`;
+          if (!seenAdvertisements.has(key)) {
+            seenAdvertisements.add(key);
+            summary.advertisements.push({
+              packet_index: index,
+              address: adv.adv_address,
+              address_type: adv.adv_address_type,
+              name: adv.name,
+              service_uuids_16: adv.service_uuids_16,
+              service_data_16: adv.service_data_16,
+              rssi: nordic.rssi,
+            });
+          }
+        }
+      }
+      return;
+    }
+
+    if (nordic.packet_kind !== "data" || nordic.encrypted) {
+      return;
+    }
+    summary.data_packets += 1;
+    const dataPdu = parseDataPdu(nordic);
+    if (!dataPdu || dataPdu.length === 0) {
+      return;
+    }
+    if (dataPdu.llid === 3) {
+      return;
+    }
+
+    const direction = nordic.direction;
+    let completeL2cap = null;
+    if (dataPdu.llid === 2 && dataPdu.payload.length >= 4) {
+      const l2capLength = dataPdu.payload.readUInt16LE(0);
+      const cid = dataPdu.payload.readUInt16LE(2);
+      const body = Buffer.from(dataPdu.payload.subarray(4));
+      if (body.length >= l2capLength) {
+        completeL2cap = { cid, payload: body.subarray(0, l2capLength) };
+        l2capReassembly[direction] = null;
+      } else {
+        l2capReassembly[direction] = { cid, expected: l2capLength, chunks: [body] };
+      }
+    } else if (dataPdu.llid === 1 && l2capReassembly[direction]) {
+      const state = l2capReassembly[direction];
+      state.chunks.push(Buffer.from(dataPdu.payload));
+      const body = Buffer.concat(state.chunks);
+      if (body.length >= state.expected) {
+        completeL2cap = { cid: state.cid, payload: body.subarray(0, state.expected) };
+        l2capReassembly[direction] = null;
+      }
+    }
+
+    if (!completeL2cap || completeL2cap.cid !== 0x0004) {
+      return;
+    }
+    const att = parseAtt(direction, completeL2cap.payload);
+    if (!att) {
+      return;
+    }
+    summary.att_packets += 1;
+    if (att.value) {
+      const events = decodeProxyValue(proxyReassembly, direction, att.value);
+      for (const event of events) {
+        summary.provisioning_events.push({
+          packet_index: index,
+          ts_sec: record.ts_sec,
+          ts_usec: record.ts_usec,
+          direction,
+          att_opcode: att.opcode_name,
+          handle: att.handle,
+          ...event,
+        });
+      }
+    }
+  });
+
+  summary.advertisement_stats = Array.from(advertisementStats.values()).map((stat) => ({
+    address: stat.address,
+    address_type: stat.address_type,
+    names: Array.from(stat.names).sort(),
+    service_uuids_16: Array.from(stat.service_uuids_16).sort(),
+    service_data_16: Array.from(stat.service_data_16).sort(),
+    packets: stat.packets,
+    first_packet: stat.first_packet,
+    last_packet: stat.last_packet,
+    max_rssi: stat.max_rssi,
+    min_rssi: stat.min_rssi,
+  })).sort((left, right) => right.max_rssi - left.max_rssi);
+
+  return summary;
+}
+
+function decodeProxyValue(proxyReassembly, direction, value) {
+  if (value.length < 1) {
+    return [];
+  }
+  const sar = (value[0] >> 6) & 0x03;
+  const messageType = value[0] & 0x3f;
+  if (messageType !== 0x03) {
+    return [];
+  }
+  const body = Buffer.from(value.subarray(1));
+  if (sar === 0) {
+    return [summarizeProvisioningPdu(body, sar, 1)];
+  }
+  if (sar === 1) {
+    proxyReassembly[direction] = { chunks: [body], segments: 1 };
+    return [];
+  }
+  const state = proxyReassembly[direction];
+  if (!state) {
+    return [];
+  }
+  state.chunks.push(body);
+  state.segments += 1;
+  if (sar !== 3) {
+    return [];
+  }
+  proxyReassembly[direction] = null;
+  return [summarizeProvisioningPdu(Buffer.concat(state.chunks), sar, state.segments)];
+}
+
+function summarizeProvisioningPdu(pdu, sar, segments) {
+  const pduType = pdu.length ? pdu[0] : -1;
+  const out = {
+    proxy_sar: sar,
+    proxy_segments: segments,
+    provisioning_pdu_type: pduType,
+    provisioning_pdu_name: PROVISIONING_TYPES[pduType] || `unknown_0x${pduType.toString(16)}`,
+    provisioning_pdu_length: pdu.length,
+  };
+  if ([0x03, 0x05, 0x06, 0x07].includes(pduType)) {
+    out.payload_fingerprint = fingerprint(pdu);
+  }
+  if (pduType === 0x01 && pdu.length >= 12) {
+    out.capabilities = {
+      elements: pdu[1],
+      algorithms: `0x${pdu.readUInt16BE(2).toString(16).padStart(4, "0")}`,
+      public_key_type: pdu[4],
+      static_oob_type: pdu[5],
+      output_oob_size: pdu[6],
+      output_oob_action: `0x${pdu.readUInt16BE(7).toString(16).padStart(4, "0")}`,
+      input_oob_size: pdu[9],
+      input_oob_action: `0x${pdu.readUInt16BE(10).toString(16).padStart(4, "0")}`,
+    };
+  } else if (pduType === 0x02 && pdu.length >= 6) {
+    out.start = {
+      algorithm: pdu[1],
+      public_key: pdu[2],
+      auth_method: pdu[3],
+      auth_action: pdu[4],
+      auth_size: pdu[5],
+    };
+  } else if (pduType === 0x09 && pdu.length >= 2) {
+    out.failed_error = pdu[1];
+  }
+  return out;
+}
+
+function printText(summary) {
+  console.log(`records=${summary.records} nordic_packets=${summary.nordic_packets} advertising=${summary.advertising_packets} data=${summary.data_packets} att=${summary.att_packets}`);
+  if (summary.advertisements.length) {
+    console.log("advertisements:");
+    for (const adv of summary.advertisements.slice(0, 20)) {
+      const services = Array.from(new Set([
+        ...adv.service_uuids_16,
+        ...adv.service_data_16.map((service) => `${service}:data`),
+      ]));
+      console.log(`  ${adv.address} ${adv.address_type} rssi=${adv.rssi} name=${adv.name || ""} services=${services.join(",")}`);
+    }
+  }
+  const meshTargets = summary.advertisement_stats.filter((stat) => (
+    stat.service_uuids_16.includes("1827") ||
+    stat.service_uuids_16.includes("1828") ||
+    stat.service_data_16.includes("1827") ||
+    stat.service_data_16.includes("1828")
+  ));
+  if (meshTargets.length) {
+    console.log("mesh_targets:");
+    for (const target of meshTargets.slice(0, 20)) {
+      const services = Array.from(new Set([
+        ...target.service_uuids_16,
+        ...target.service_data_16.map((service) => `${service}:data`),
+      ]));
+      console.log(`  ${target.address} ${target.address_type} max_rssi=${target.max_rssi} packets=${target.packets} names=${target.names.join("|")} services=${services.join(",")}`);
+    }
+  }
+  if (summary.connect_indications.length) {
+    console.log("connect_indications:");
+    for (const conn of summary.connect_indications) {
+      console.log(`  packet=${conn.packet_index} crc=${conn.crc_ok ? "ok" : "bad"} rssi=${conn.rssi} advertiser=${conn.advertiser_address} ${conn.advertiser_address_type || "unknown"} initiator=${conn.initiator_address || "-"} ${conn.initiator_address_type || "unknown"} aa=${conn.access_address} interval=${conn.interval} latency=${conn.latency} timeout=${conn.timeout} hop=${conn.hop_increment}`);
+    }
+  }
+  if (summary.provisioning_events.length) {
+    console.log("provisioning_events:");
+    for (const event of summary.provisioning_events) {
+      const fp = event.payload_fingerprint ? ` fp=${event.payload_fingerprint}` : "";
+      console.log(`  packet=${event.packet_index} ${event.direction} ${event.att_opcode} ${event.handle} ${event.provisioning_pdu_name} len=${event.provisioning_pdu_length} segs=${event.proxy_segments}${fp}`);
+    }
+  } else {
+    console.log("provisioning_events=none");
+  }
+}
+
+const args = process.argv.slice(2);
+const json = args[0] === "--json";
+const path = json ? args[1] : args[0];
+if (!path || args.length > (json ? 2 : 1)) {
+  usage();
+}
+
+try {
+  const summary = decodeCapture(path);
+  if (json) {
+    console.log(JSON.stringify(summary, null, 2));
+  } else {
+    printText(summary);
+  }
+} catch (error) {
+  console.error(`decode-nordic-pcap: ${error.message}`);
+  process.exit(1);
+}
