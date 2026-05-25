@@ -126,7 +126,7 @@ def remove_fixture(payload, address):
     ]
 
 
-def status_for(root, state_path, address):
+def status_for(root, state_path, timeout, address):
     command = [
         str(Path(root) / "bin" / "amaran"),
         "status",
@@ -135,6 +135,8 @@ def status_for(root, state_path, address):
         str(address),
         "--state-path",
         str(state_path),
+        "--timeout",
+        str(timeout),
     ]
     return subprocess.run(command, text=True, capture_output=True)
 
@@ -144,12 +146,15 @@ def normalize_status(address, fixture, raw_status):
     intensity = cct.get("intensity")
     if isinstance(intensity, (int, float)) and intensity > 100:
         intensity = intensity / 10
+    cct_kelvin = cct.get("cct_kelvin", cct.get("cct"))
+    if isinstance(cct_kelvin, (int, float)) and cct_kelvin < 1000:
+        cct_kelvin = cct_kelvin * 10
     return {
         "address": address,
         "name": fixture_label(fixture),
         "mac_suffix": mac_suffix(fixture.get("mac_address")),
         "intensity": intensity,
-        "cct": cct.get("cct"),
+        "cct": cct_kelvin,
         "sleep_mode": cct.get("sleep_mode"),
         "control_only": bool(fixture.get("control_only")),
     }
@@ -159,6 +164,7 @@ def main():
     parser = argparse.ArgumentParser(description="Discover control-capable fixtures already on a known mesh")
     parser.add_argument("--root", required=True)
     parser.add_argument("--state-path", required=True)
+    parser.add_argument("--timeout", default="20")
     parser.add_argument("--range", required=True)
     parser.add_argument("--update-state", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -181,7 +187,7 @@ def main():
         added = ensure_fixture(payload, address)
         write_state(state_path, payload)
 
-        result = status_for(args.root, state_path, address)
+        result = status_for(args.root, state_path, args.timeout, address)
         latest = load_state(state_path)
         fixture = next(
             (item for item in latest.get("fixtures", []) if isinstance(item, dict) and item.get("node_address") == address),

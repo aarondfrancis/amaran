@@ -57,9 +57,9 @@ Useful commands:
 - `./bin/amaran state-install <source-state.json> --json`
 - `./bin/amaran discover --range <start-end[,addr]> [--update-state]`
 - `./bin/amaran discover --range <start-end[,addr]> [--update-state] --json`
-- `./bin/amaran scene capture <name>`
+- `./bin/amaran scene capture <name> [--node <id>]`
 - `./bin/amaran scene capture <name> --json`
-- `./bin/amaran scene apply <name>`
+- `./bin/amaran scene apply <name> [--node <id>]`
 - `./bin/amaran scene apply <name> --json`
 - `./bin/amaran scene list`
 - `./bin/amaran scene list --json`
@@ -138,10 +138,11 @@ Implementation notes:
   DeviceKeys, names, MACs, groups, or Sidus scenes; use a fresh Sidus backup
   import for that metadata.
 - `./bin/amaran scene capture <name>` reads live vendor status from fixtures and
-  stores a local named scene in the top-level `scenes` object. `scene apply`
-  restores saved intensity/CCT/sleep state through direct runtime commands.
-  `scene list` and `scene show` are offline reads. Scene commands must not print
-  mesh/app/device keys.
+  stores a local named scene in the top-level `scenes` object. With
+  `--node <id>`, it captures only that fixture. `scene apply` restores saved
+  intensity/CCT/sleep state through direct runtime commands; with `--node`, it
+  applies only that fixture's saved entry. `scene list` and `scene show` are
+  offline reads. Scene commands must not print mesh/app/device keys.
 - `./bin/amaran join-capture --output-state <capture.json>` is experimental.
   It launches `BluetoothProbe.app` as a CoreBluetooth peripheral that advertises
   Mesh Provisioning service `0x1827` and behaves as a dummy no-OOB provisionee.

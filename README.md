@@ -37,8 +37,8 @@ truth, then import that mesh metadata from an encrypted local iPad backup.
 ./bin/amaran state-join /tmp/sidus-join.json
 ./bin/amaran state-install /tmp/amaran-test-state.json
 ./bin/amaran discover --range 2-64 --update-state
-./bin/amaran scene capture "recording scene"
-./bin/amaran scene apply "recording scene"
+./bin/amaran scene capture "recording scene" --node 7
+./bin/amaran scene apply "recording scene" --node 7
 ./bin/amaran scene list
 ./bin/amaran scene show "recording scene"
 ./bin/amaran list
@@ -132,9 +132,11 @@ Scenes live in the same local state file:
 
 ```sh
 ./bin/amaran scene capture "recording scene"
+./bin/amaran scene capture "recording scene" --node 7
 ./bin/amaran scene list
 ./bin/amaran scene show "recording scene"
 ./bin/amaran scene apply "recording scene"
+./bin/amaran scene apply "recording scene" --node 7
 ```
 
 `scene capture` reads live fixture status and stores intensity, CCT, and sleep
@@ -273,8 +275,8 @@ State and pairing commands manage local state and fixture setup.
 | `./bin/amaran state-join <join-state.json> [--json]` | Join an existing mesh for runtime control from externally supplied NetKey/AppKey metadata. Writes control-only fixture state when DeviceKeys are absent. |
 | `./bin/amaran state-install <source-state.json> [--json]` | Validate and install a state file with `0600` permissions. Refuses to overwrite existing target state. |
 | `./bin/amaran discover --range <spec> [--update-state] [--json]` | Probe candidate unicast addresses on the current mesh and optionally keep responsive control-only fixture entries. |
-| `./bin/amaran scene capture <name> [--json]` | Read live status from fixtures and save a named scene in local state. |
-| `./bin/amaran scene apply <name> [--json]` | Apply a saved scene through direct runtime commands. |
+| `./bin/amaran scene capture <name> [--node <id>] [--json]` | Read live status from fixtures and save a named scene in local state. With `--node`, capture only that fixture. |
+| `./bin/amaran scene apply <name> [--node <id>] [--json]` | Apply a saved scene through direct runtime commands. With `--node`, apply only that fixture's entry. |
 | `./bin/amaran scene list [--json]` | List saved scenes without launching BLE. |
 | `./bin/amaran scene show <name> [--json]` | Show one saved scene without launching BLE. |
 

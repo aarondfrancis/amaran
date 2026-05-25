@@ -47,8 +47,8 @@ assert_contains "$HELP_OUTPUT" "amaran pair-test [--add] [--attention <0-255>] [
 assert_contains "$HELP_OUTPUT" "amaran sidus-import --backup <path>" "help sidus-import usage"
 assert_contains "$HELP_OUTPUT" "amaran state-join <join-state.json> [--json]" "help state-join usage"
 assert_contains "$HELP_OUTPUT" "amaran discover --range <start-end" "help discover usage"
-assert_contains "$HELP_OUTPUT" "amaran scene capture <name>" "help scene capture usage"
-assert_contains "$HELP_OUTPUT" "amaran scene apply <name>" "help scene apply usage"
+assert_contains "$HELP_OUTPUT" "amaran scene capture <name> [--node <id>]" "help scene capture usage"
+assert_contains "$HELP_OUTPUT" "amaran scene apply <name> [--node <id>]" "help scene apply usage"
 assert_contains "$HELP_OUTPUT" "config-node-reset-test [--dry-run|--confirm-reset]" "help node reset usage"
 assert_contains "$HELP_OUTPUT" "--state-path <p>" "help state path option"
 assert_contains "$HELP_OUTPUT" "--backup <path>" "help backup option"
@@ -310,6 +310,19 @@ payload.setdefault("scenes", {})["recording scene"] = {
         }
     ],
 }
+payload.setdefault("scenes", {})["legacy scene"] = {
+    "captured_at": "2026-05-25T00:00:00Z",
+    "fixtures": [
+        {
+            "node_address": 7,
+            "name": "400M5-123C21",
+            "mac_suffix": "123C21",
+            "intensity": 18,
+            "cct": 560,
+            "sleep_mode": 1,
+        }
+    ],
+}
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(payload, fh)
     fh.write("\n")
@@ -321,6 +334,8 @@ assert_contains "$SCENE_SHOW_OUTPUT" "400M5-123C21" "scene show fixture"
 assert_contains "$SCENE_SHOW_OUTPUT" "5600K" "scene show cct"
 SCENE_SHOW_JSON_OUTPUT="$("$ROOT/bin/amaran" scene show "recording scene" --json --state-path "$SIDUS_IMPORTED_STATE")"
 assert_contains "$SCENE_SHOW_JSON_OUTPUT" '"fixture_count": 1' "scene show json"
+LEGACY_SCENE_SHOW_OUTPUT="$("$ROOT/bin/amaran" scene show "legacy scene" --state-path "$SIDUS_IMPORTED_STATE")"
+assert_contains "$LEGACY_SCENE_SHOW_OUTPUT" "5600K" "scene show legacy raw CCT normalization"
 
 DISCOVER_INVALID_OUTPUT="$TMPDIR/discover-invalid.out"
 if "$ROOT/bin/amaran" discover --range bad --state-path "$SIDUS_IMPORTED_STATE" >"$DISCOVER_INVALID_OUTPUT" 2>&1; then
@@ -507,6 +522,7 @@ for output in \
   "$SCENE_LIST_OUTPUT" \
   "$SCENE_SHOW_OUTPUT" \
   "$SCENE_SHOW_JSON_OUTPUT" \
+  "$LEGACY_SCENE_SHOW_OUTPUT" \
   "$NODE_RESET_DRY_RUN_OUTPUT" \
   "$NODE_RESET_DRY_RUN_JSON" \
   "$INSTALL_OUTPUT"

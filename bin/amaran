@@ -36,8 +36,8 @@ Usage:
   amaran state-join <join-state.json> [--json]
   amaran state-install <source-state.json> [--json]
   amaran discover --range <start-end[,addr]> [--update-state] [--json]
-  amaran scene capture <name> [--json]
-  amaran scene apply <name> [--json]
+  amaran scene capture <name> [--node <id>] [--json]
+  amaran scene apply <name> [--node <id>] [--json]
   amaran scene list [--json]
   amaran scene show <name> [--json]
   amaran list [--json]
@@ -166,8 +166,8 @@ Sidus-first studio workflow:
      addresses without re-pairing through the CLI:
        ./bin/amaran discover --range 2-64 --update-state
   5. Save and recall lighting looks:
-       ./bin/amaran scene capture "recording scene"
-       ./bin/amaran scene apply "recording scene"
+       ./bin/amaran scene capture "recording scene" --node 7
+       ./bin/amaran scene apply "recording scene" --node 7
 
   A fresh Sidus backup is still the authoritative way to import Sidus app
   metadata, DeviceKeys, or a changed mesh/AppKey. discover can find runtime
@@ -195,8 +195,8 @@ Examples:
   ./bin/amaran sidus-import --backup /private/tmp/Backup
   ./bin/amaran state-join /tmp/sidus-join.json
   ./bin/amaran discover --range 2-64 --update-state
-  ./bin/amaran scene capture "recording scene"
-  ./bin/amaran scene apply "recording scene"
+  ./bin/amaran scene capture "recording scene" --node 7
+  ./bin/amaran scene apply "recording scene" --node 7
   ./bin/amaran pair --dry-run --state-path /tmp/amaran-state.json
   ./bin/amaran pair --verify --state-path /tmp/amaran-state.json
   ./bin/amaran pair --add --verify
@@ -1323,7 +1323,7 @@ run_discover_command() {
   fi
 
   local range_spec="${DISCOVER_RANGE:-2-64}"
-  local args=("$ROOT/scripts/discover-existing-mesh" --root "$ROOT" --state-path "$STATE_PATH" --range "$range_spec")
+  local args=("$ROOT/scripts/discover-existing-mesh" --root "$ROOT" --state-path "$STATE_PATH" --timeout "$TIMEOUT" --range "$range_spec")
   if [[ "$DISCOVER_UPDATE_STATE" == "1" ]]; then
     args+=(--update-state)
   fi
@@ -1350,7 +1350,10 @@ run_scene_command() {
       ;;
   esac
 
-  local args=("$ROOT/scripts/scene-store" --root "$ROOT" --state-path "$STATE_PATH")
+  local args=("$ROOT/scripts/scene-store" --root "$ROOT" --state-path "$STATE_PATH" --timeout "$TIMEOUT")
+  if [[ -n "$NODE_ID" ]]; then
+    args+=(--node "$NODE_ID")
+  fi
   if [[ "$JSON" == "1" ]]; then
     args+=(--json)
   fi
@@ -2430,7 +2433,7 @@ status = {
         "gm_flag": cct.get("gm_flag"),
         "gm_high": cct.get("gm_high"),
         "gm": cct.get("gm_decoded"),
-        "cct": cct.get("cct_decoded"),
+        "cct": cct.get("cct_kelvin"),
         "intensity": cct.get("intensity"),
         "check_sum": telink_status.get("check_sum"),
         "command_type": telink_status.get("command_type"),

@@ -124,15 +124,18 @@ Scenes are local CLI snapshots stored under the top-level `scenes` object in
 
 ```sh
 ./bin/amaran scene capture "recording scene"
+./bin/amaran scene capture "recording scene" --node 7
 ./bin/amaran scene list
 ./bin/amaran scene show "recording scene"
 ./bin/amaran scene apply "recording scene"
+./bin/amaran scene apply "recording scene" --node 7
 ```
 
 `scene capture` reads each fixture's current vendor CCT status and stores
-intensity, CCT, and sleep state. `scene apply` sends direct runtime commands to
-restore those values. The iPad remains the source of truth for pairing; the CLI
-scene store is just a fast local control layer.
+intensity, CCT, and sleep state. Pass `--node <id>` to capture or apply one
+fixture from a larger state file. `scene apply` sends direct runtime commands
+to restore those values. The iPad remains the source of truth for pairing; the
+CLI scene store is just a fast local control layer.
 
 ## Sidus Link Pro Reality
 

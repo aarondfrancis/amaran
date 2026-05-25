@@ -75,7 +75,7 @@ def scene_map(payload):
     return scenes
 
 
-def status_for(root, state_path, address):
+def status_for(root, state_path, timeout, address):
     command = [
         str(Path(root) / "bin" / "amaran"),
         "status",
@@ -84,17 +84,19 @@ def status_for(root, state_path, address):
         str(address),
         "--state-path",
         str(state_path),
+        "--timeout",
+        str(timeout),
     ]
     return subprocess.run(command, text=True, capture_output=True)
 
 
-def control(root, state_path, entry):
+def control(root, state_path, timeout, entry):
     address = str(entry["node_address"])
     sleep_mode = entry.get("sleep_mode")
     if sleep_mode == 0:
-        command = [str(Path(root) / "bin" / "amaran"), "off", "--node", address, "--state-path", str(state_path)]
+        command = [str(Path(root) / "bin" / "amaran"), "off", "--node", address, "--state-path", str(state_path), "--timeout", str(timeout)]
     else:
-        cct = entry.get("cct")
+        cct = normalize_cct_kelvin(entry.get("cct"))
         intensity = entry.get("intensity")
         if cct is not None and intensity is not None:
             command = [
@@ -107,6 +109,8 @@ def control(root, state_path, entry):
                 address,
                 "--state-path",
                 str(state_path),
+                "--timeout",
+                str(timeout),
             ]
         elif intensity is not None:
             command = [
@@ -117,9 +121,11 @@ def control(root, state_path, entry):
                 address,
                 "--state-path",
                 str(state_path),
+                "--timeout",
+                str(timeout),
             ]
         else:
-            command = [str(Path(root) / "bin" / "amaran"), "on", "--node", address, "--state-path", str(state_path)]
+            command = [str(Path(root) / "bin" / "amaran"), "on", "--node", address, "--state-path", str(state_path), "--timeout", str(timeout)]
     return subprocess.run(command, text=True, capture_output=True)
 
 
@@ -128,14 +134,23 @@ def normalize_status(fixture, status):
     intensity = cct.get("intensity")
     if isinstance(intensity, (int, float)) and intensity > 100:
         intensity = intensity / 10
+    cct_kelvin = normalize_cct_kelvin(cct.get("cct_kelvin", cct.get("cct")))
     return {
         "node_address": fixture.get("node_address"),
         "name": fixture_label(fixture),
         "mac_suffix": mac_suffix(fixture.get("mac_address")),
         "intensity": intensity,
-        "cct": cct.get("cct"),
+        "cct": cct_kelvin,
         "sleep_mode": cct.get("sleep_mode"),
     }
+
+
+def normalize_cct_kelvin(value):
+    if not isinstance(value, (int, float)):
+        return value
+    if value < 1000:
+        return value * 10
+    return value
 
 
 def scene_summary(name, scene):
@@ -148,10 +163,24 @@ def scene_summary(name, scene):
     }
 
 
+def selected_fixtures(payload, node_id):
+    fixtures = [fixture for fixture in payload.get("fixtures", []) if isinstance(fixture, dict)]
+    if node_id in (None, ""):
+        return fixtures
+    try:
+        address = int(str(node_id), 0)
+    except ValueError:
+        fail("scene --node must be a fixture address")
+    matches = [fixture for fixture in fixtures if fixture.get("node_address") == address]
+    if not matches:
+        fail(f"scene fixture not found at address {address}")
+    return matches
+
+
 def cmd_capture(args):
     state_path = Path(args.state_path).expanduser().resolve()
     payload = load_state(state_path)
-    fixtures = [fixture for fixture in payload.get("fixtures", []) if isinstance(fixture, dict)]
+    fixtures = selected_fixtures(payload, args.node)
     if not fixtures:
         fail("local state has no fixtures")
 
@@ -160,7 +189,7 @@ def cmd_capture(args):
         address = fixture.get("node_address")
         if not isinstance(address, int):
             continue
-        result = status_for(args.root, state_path, address)
+        result = status_for(args.root, state_path, args.timeout, address)
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip().splitlines()[-1:] or ["status failed"]
             fail(f"could not capture fixture {fixture_label(fixture)} at address {address}: {detail[0]}")
@@ -191,11 +220,19 @@ def cmd_apply(args):
     scene = scenes.get(args.name)
     if not isinstance(scene, dict):
         fail(f"scene not found: {args.name}")
+    selected_address = None
+    if args.node not in (None, ""):
+        try:
+            selected_address = int(str(args.node), 0)
+        except ValueError:
+            fail("scene --node must be a fixture address")
     applied = []
     for entry in scene.get("fixtures") or []:
         if not isinstance(entry, dict) or not isinstance(entry.get("node_address"), int):
             continue
-        result = control(args.root, state_path, entry)
+        if selected_address is not None and entry.get("node_address") != selected_address:
+            continue
+        result = control(args.root, state_path, args.timeout, entry)
         applied.append({
             "address": entry.get("node_address"),
             "name": entry.get("name") or f"fixture-{entry.get('node_address')}",
@@ -240,8 +277,9 @@ def cmd_show(args):
         parts = [fixture.get("name") or f"fixture-{fixture.get('node_address')}", str(fixture.get("node_address"))]
         if fixture.get("intensity") is not None:
             parts.append(f"{fixture['intensity']:g}%")
-        if fixture.get("cct") is not None:
-            parts.append(f"{fixture['cct']}K")
+        cct_kelvin = normalize_cct_kelvin(fixture.get("cct"))
+        if cct_kelvin is not None:
+            parts.append(f"{cct_kelvin:g}K")
         print("\t".join(parts))
 
 
@@ -249,6 +287,8 @@ def main():
     parser = argparse.ArgumentParser(description="Capture and apply named amaran scenes")
     parser.add_argument("--root", required=True)
     parser.add_argument("--state-path", required=True)
+    parser.add_argument("--timeout", default="20")
+    parser.add_argument("--node", default="")
     parser.add_argument("--json", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
 
