@@ -1150,11 +1150,23 @@ class AmaranTui(App):
             return
         self.refresh_all_task = asyncio.create_task(self.refresh_all())
 
+    def refresh_all_order(self):
+        named = []
+        unnamed = []
+        for address in self.fixture_order:
+            fixture = self.fixtures.get(address)
+            if fixture and fixture.friendly_name:
+                named.append(address)
+            else:
+                unnamed.append(address)
+        return named + unnamed
+
     async def refresh_all(self):
         try:
-            addresses = list(self.fixture_order)
+            addresses = self.refresh_all_order()
             total = len(addresses)
-            self.append_log(f"refreshing all fixtures with {self.status_timeout:g}s status timeout")
+            named_count = sum(1 for address in addresses if self.fixtures.get(address) and self.fixtures[address].friendly_name)
+            self.append_log(f"refreshing all fixtures with {self.status_timeout:g}s status timeout; {named_count} named first")
             for index, address in enumerate(addresses, start=1):
                 fixture = self.fixtures.get(address)
                 if fixture:
