@@ -147,25 +147,123 @@ class SceneView:
 
 
 class ValueBar(Static):
-    def set_value(self, label, value, minimum, maximum, suffix="", width=18):
-        if value is None:
-            self.update(f"{label:<10} [unknown]")
+    can_focus = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.label = ""
+        self.value = None
+        self.minimum = 0.0
+        self.maximum = 100.0
+        self.suffix = ""
+        self.width = 18
+        self.step = 1.0
+        self.kind = ""
+
+    def set_value(self, label, value, minimum, maximum, suffix="", width=18, step=1, kind=""):
+        self.label = label
+        self.value = value
+        self.minimum = float(minimum)
+        self.maximum = float(maximum)
+        self.suffix = suffix
+        self.width = int(width)
+        self.step = float(step)
+        self.kind = kind
+        self.render_value()
+
+    def render_value(self):
+        if self.value is None:
+            self.update(f"{self.focus_marker()}{self.label:<10} [unknown]")
             return
         try:
-            numeric = float(value)
+            numeric = float(self.value)
         except (TypeError, ValueError):
-            self.update(f"{label:<10} [unknown]")
+            self.update(f"{self.focus_marker()}{self.label:<10} [unknown]")
             return
-        numeric = max(float(minimum), min(float(maximum), numeric))
-        span = max(float(maximum) - float(minimum), 1.0)
-        filled = round(((numeric - float(minimum)) / span) * width)
-        filled = max(0, min(width, filled))
-        bar = "#" * filled + "-" * (width - filled)
-        if isinstance(value, float) and not value.is_integer():
-            rendered = f"{value:.1f}{suffix}"
+        numeric = max(self.minimum, min(self.maximum, numeric))
+        span = max(self.maximum - self.minimum, 1.0)
+        filled = round(((numeric - self.minimum) / span) * self.width)
+        filled = max(0, min(self.width, filled))
+        bar = "#" * filled + "-" * (self.width - filled)
+        if isinstance(self.value, float) and not self.value.is_integer():
+            rendered = f"{self.value:.1f}{self.suffix}"
         else:
-            rendered = f"{int(value)}{suffix}"
-        self.update(f"{label:<10} [{bar}] {rendered}")
+            rendered = f"{int(self.value)}{self.suffix}"
+        self.update(f"{self.focus_marker()}{self.label:<10} [{bar}] {rendered}")
+
+    def focus_marker(self):
+        return ">" if self.has_focus else " "
+
+    def on_focus(self):
+        self.render_value()
+
+    def on_blur(self):
+        self.render_value()
+
+    def value_from_x(self, x):
+        start = 13
+        end = start + max(self.width - 1, 1)
+        ratio = (max(start, min(end, int(x))) - start) / max(end - start, 1)
+        raw = self.minimum + (ratio * (self.maximum - self.minimum))
+        stepped = self.minimum + (round((raw - self.minimum) / self.step) * self.step)
+        stepped = max(self.minimum, min(self.maximum, stepped))
+        if self.step.is_integer():
+            return int(stepped)
+        return stepped
+
+    def clamped_step(self, delta):
+        current = self.value
+        if current is None:
+            current = (self.minimum + self.maximum) / 2
+        try:
+            numeric = float(current)
+        except (TypeError, ValueError):
+            numeric = (self.minimum + self.maximum) / 2
+        next_value = numeric + delta
+        next_value = max(self.minimum, min(self.maximum, next_value))
+        if self.step.is_integer():
+            return int(next_value)
+        return next_value
+
+    def submit_value(self, value):
+        self.value = value
+        self.render_value()
+        app = self.app
+        if hasattr(app, "request_control_value"):
+            app.request_control_value(self.kind, value)
+
+    def on_mouse_down(self, event):
+        if getattr(event, "button", 0) != 1:
+            return
+        self.focus()
+        self.submit_value(self.value_from_x(getattr(event, "x", 0)))
+        event.stop()
+
+    def on_mouse_move(self, event):
+        if getattr(event, "button", 0) != 1:
+            return
+        self.submit_value(self.value_from_x(getattr(event, "x", 0)))
+        event.stop()
+
+    def on_key(self, event):
+        if event.key in ("left", "down"):
+            self.submit_value(self.clamped_step(-self.step))
+            event.stop()
+        elif event.key in ("right", "up"):
+            self.submit_value(self.clamped_step(self.step))
+            event.stop()
+        elif event.key == "pagedown":
+            self.submit_value(self.clamped_step(-self.step * 10))
+            event.stop()
+        elif event.key == "pageup":
+            self.submit_value(self.clamped_step(self.step * 10))
+            event.stop()
+        elif event.key == "home":
+            self.submit_value(int(self.minimum) if self.step.is_integer() else self.minimum)
+            event.stop()
+        elif event.key == "end":
+            self.submit_value(int(self.maximum) if self.step.is_integer() else self.maximum)
+            event.stop()
 
 
 def parse_terminal_background(response):
@@ -312,6 +410,14 @@ class AmaranTui(App):
         margin: 0 1 0 0;
     }
 
+    ValueBar {
+        height: 1;
+    }
+
+    ValueBar:focus {
+        background: $accent 20%;
+    }
+
     DataTable {
         height: 1fr;
     }
@@ -323,7 +429,6 @@ class AmaranTui(App):
         ("R", "refresh_all", "Refresh all"),
         ("space", "toggle_power", "On/off"),
         ("x", "toggle_capture_include", "Capture"),
-        ("o", "toggle_capture_off", "Off in scene"),
         ("i", "identify", "Identify"),
         ("a", "apply_scene", "Apply scene"),
         ("c", "capture_scene", "Capture"),
@@ -343,10 +448,14 @@ class AmaranTui(App):
         self.fixture_order: List[int] = []
         self.selected_address: Optional[int] = None
         self.capture_include = set()
-        self.capture_off = set()
         self.scenes: List[SceneView] = []
         self.scene_order: List[str] = []
         self.refresh_all_task = None
+        self.control_generations = {}
+        self.control_workers = {}
+        self.control_active = {}
+        self.control_sending = set()
+        self.control_debounce_seconds = self._control_debounce_seconds()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -367,14 +476,13 @@ class AmaranTui(App):
                         yield Button("Refresh", id="refresh-selected")
                         yield Button("Identify", id="identify")
                     with Horizontal(classes="controls-row"):
-                        yield Button("Include", id="capture-include")
-                        yield Button("Save Off", id="capture-off")
+                        yield Button("Capture", id="capture-include")
                 with Vertical(id="scenes-panel"):
                     yield Static("Scenes", classes="panel-title")
                     yield DataTable(id="scenes")
                     with Horizontal(classes="controls-row"):
                         yield Input(placeholder="scene name", id="scene-name")
-                        yield Button("Capture", id="capture-scene")
+                        yield Button("Save Scene", id="capture-scene")
                 with Vertical(id="log-panel"):
                     yield Static("Log", classes="panel-title")
                     yield Log(id="log")
@@ -384,7 +492,7 @@ class AmaranTui(App):
         fixtures = self.query_one("#fixtures", DataTable)
         fixtures.cursor_type = "row"
         fixtures.zebra_stripes = True
-        fixtures.add_columns("fixture", "addr", "cap", "off", "state", "power", "int", "cct", "gm")
+        fixtures.add_columns("fixture", "addr", "cap", "state", "power", "int", "cct", "gm")
 
         scenes = self.query_one("#scenes", DataTable)
         scenes.cursor_type = "row"
@@ -412,6 +520,15 @@ class AmaranTui(App):
         if configured:
             return self._command_timeout(configured)
         return min(self.command_timeout, 5.0)
+
+    def _control_debounce_seconds(self):
+        configured = os.environ.get("AMARAN_TUI_DEBOUNCE")
+        if configured:
+            try:
+                return max(0.05, float(configured))
+            except ValueError:
+                return 0.35
+        return 0.35
 
     def append_log(self, message):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -480,7 +597,6 @@ class AmaranTui(App):
 
         previous = self.fixtures
         previous_include = set(self.capture_include)
-        previous_off = set(self.capture_off)
         self.fixtures = {}
         self.fixture_order = []
         for row in rows if isinstance(rows, list) else []:
@@ -513,7 +629,6 @@ class AmaranTui(App):
             self.selected_address = self.fixture_order[0] if self.fixture_order else None
         current_addresses = set(self.fixture_order)
         self.capture_include = previous_include & current_addresses
-        self.capture_off = previous_off & self.capture_include
         self.render_fixtures()
         self.append_log(f"loaded {len(self.fixture_order)} fixtures")
 
@@ -551,7 +666,6 @@ class AmaranTui(App):
                 fixture.name,
                 str(address),
                 "[x]" if address in self.capture_include else "[ ]",
-                "[x]" if address in self.capture_off else "[ ]",
                 self.render_status(fixture),
                 fixture.power,
                 self.render_percent(fixture.intensity),
@@ -631,17 +745,17 @@ class AmaranTui(App):
         gm = self.query_one("#gm", ValueBar)
         if fixture is None:
             title.update("Selected")
-            brightness.set_value("Brightness", None, 0, 100, "%")
-            cct.set_value("Temp", None, 2000, 10000, "K")
-            gm.set_value("G/M", None, 0, 20)
+            brightness.set_value("Brightness", None, 0, 100, "%", step=1, kind="brightness")
+            cct.set_value("Temp", None, 2000, 10000, "K", step=100, kind="cct")
+            gm.set_value("G/M", None, 0, 20, step=1, kind="gm")
             return
         detail = f"{fixture.name}  addr {fixture.address}  {fixture.status}"
         if fixture.last_error:
             detail += f"  error: {fixture.last_error}"
         title.update(detail)
-        brightness.set_value("Brightness", fixture.intensity, 0, 100, "%")
-        cct.set_value("Temp", fixture.cct, 2000, 10000, "K")
-        gm.set_value("G/M", fixture.gm, 0, 20)
+        brightness.set_value("Brightness", fixture.intensity, 0, 100, "%", step=1, kind="brightness")
+        cct.set_value("Temp", fixture.cct, 2000, 10000, "K", step=100, kind="cct")
+        gm.set_value("G/M", fixture.gm, 0, 20, step=1, kind="gm")
 
     async def refresh_fixture(self, fixture):
         fixture.pending = True
@@ -680,6 +794,8 @@ class AmaranTui(App):
             self.update_selected_panel()
 
     async def control_fixture(self, fixture, command, *args):
+        if command in ("on", "off"):
+            self.cancel_control_send(fixture.address)
         fixture.pending = True
         fixture.last_error = None
         self.render_fixtures()
@@ -741,6 +857,81 @@ class AmaranTui(App):
             str(next_gm),
         )
 
+    def request_control_value(self, kind, value):
+        fixture = self.current_fixture()
+        if not fixture:
+            return
+        if kind == "brightness":
+            fixture.intensity = max(0, min(100, float(value)))
+        elif kind == "cct":
+            fixture.cct = max(2000, min(10000, int(value)))
+        elif kind == "gm":
+            fixture.gm = max(0, min(20, int(value)))
+        else:
+            return
+        fixture.power = "on"
+        fixture.status = "online"
+        fixture.last_error = None
+        fixture.updated_at = datetime.now()
+        self.render_fixtures()
+        self.update_selected_panel()
+        self.queue_control_send(fixture.address)
+
+    def queue_control_send(self, address):
+        generation = int(self.control_generations.get(address, 0)) + 1
+        self.control_generations[address] = generation
+        self.control_active[address] = True
+        worker = self.control_workers.get(address)
+        if worker is None or worker.done():
+            self.control_workers[address] = asyncio.create_task(self.control_send_worker(address))
+
+    def cancel_control_send(self, address):
+        self.control_active[address] = False
+        self.control_generations[address] = int(self.control_generations.get(address, 0)) + 1
+
+    def cancel_all_control_sends(self):
+        for address in list(self.control_active):
+            self.cancel_control_send(address)
+
+    async def flush_control_sends(self):
+        addresses = [address for address, active in self.control_active.items() if active]
+        for address in addresses:
+            worker = self.control_workers.get(address)
+            if address in self.control_sending and worker is not None:
+                await worker
+                continue
+            self.cancel_control_send(address)
+            fixture = self.fixtures.get(address)
+            if fixture:
+                await self.set_cct_bundle(fixture)
+
+    async def control_send_worker(self, address):
+        try:
+            while True:
+                if not self.control_active.get(address, False):
+                    return
+                generation = self.control_generations.get(address, 0)
+                await asyncio.sleep(self.control_debounce_seconds)
+                if not self.control_active.get(address, False):
+                    return
+                if self.control_generations.get(address, 0) != generation:
+                    continue
+                fixture = self.fixtures.get(address)
+                if not fixture:
+                    return
+                self.control_sending.add(address)
+                try:
+                    await self.set_cct_bundle(fixture)
+                finally:
+                    self.control_sending.discard(address)
+                if self.control_generations.get(address, 0) == generation:
+                    self.control_active[address] = False
+                    return
+        finally:
+            current = asyncio.current_task()
+            if self.control_workers.get(address) is current:
+                self.control_workers.pop(address, None)
+
     def schedule(self, coro):
         asyncio.create_task(coro)
 
@@ -801,6 +992,7 @@ class AmaranTui(App):
         if not scene:
             self.append_log("no scene selected")
             return
+        self.cancel_all_control_sends()
         self.append_log(f"applying scene {scene}")
         try:
             await self.run_amaran("scene", "apply", scene, extra_timeout=self.command_timeout * 2)
@@ -823,7 +1015,6 @@ class AmaranTui(App):
         address = fixture.address
         if address in self.capture_include:
             self.capture_include.discard(address)
-            self.capture_off.discard(address)
             self.append_log(f"excluded {fixture.name} from scene capture")
         else:
             self.capture_include.add(address)
@@ -831,44 +1022,29 @@ class AmaranTui(App):
         self.render_fixtures()
         self.update_selected_panel()
 
-    def action_toggle_capture_off(self):
-        fixture = self.current_fixture()
-        if not fixture:
-            return
-        address = fixture.address
-        self.capture_include.add(address)
-        if address in self.capture_off:
-            self.capture_off.discard(address)
-            self.append_log(f"{fixture.name} will be captured from live status")
-        else:
-            self.capture_off.add(address)
-            self.append_log(f"{fixture.name} will be saved as off")
-        self.render_fixtures()
-        self.update_selected_panel()
-
     def action_show_help(self):
-        self.append_log("keys: q quit, r/R refresh, space on/off, x include capture, o mark off, +/- brightness, [] temp, g/m G/M, a apply scene, c capture, i identify")
+        self.append_log("keys: q quit, r/R refresh, space on/off, x capture, +/- brightness, [] temp, g/m G/M, arrows on focused sliders, a apply scene, c save scene, i identify")
 
     async def adjust_brightness(self, delta):
         fixture = self.current_fixture()
         if not fixture:
             return
         current = fixture.intensity if fixture.intensity is not None else 50
-        await self.set_cct_bundle(fixture, intensity=current + delta)
+        self.request_control_value("brightness", current + delta)
 
     async def adjust_cct(self, delta):
         fixture = self.current_fixture()
         if not fixture:
             return
         current = fixture.cct if fixture.cct is not None else 5600
-        await self.set_cct_bundle(fixture, cct=current + delta)
+        self.request_control_value("cct", current + delta)
 
     async def adjust_gm(self, delta):
         fixture = self.current_fixture()
         if not fixture:
             return
         current = fixture.gm if fixture.gm is not None else 10
-        await self.set_cct_bundle(fixture, gm=current + delta)
+        self.request_control_value("gm", current + delta)
 
     async def capture_scene(self):
         fixture = self.current_fixture()
@@ -881,8 +1057,9 @@ class AmaranTui(App):
             return
         included = [address for address in self.fixture_order if address in self.capture_include]
         if not included:
-            self.append_log("select fixtures for capture with x; use o for fixtures saved as off")
+            self.append_log("select fixtures for capture with x; included fixtures marked off are saved as off")
             return
+        await self.flush_control_sends()
         command = ["scene", "capture", name]
         live_count = 0
         off_count = 0
@@ -890,7 +1067,7 @@ class AmaranTui(App):
             target = self.fixtures.get(address)
             if not target:
                 continue
-            if address in self.capture_off:
+            if target.power == "off":
                 command.extend(["--off-node", target.selector])
                 off_count += 1
             else:
@@ -940,10 +1117,6 @@ class AmaranTui(App):
     @on(Button.Pressed, "#capture-include")
     def capture_include_button(self, _event):
         self.action_toggle_capture_include()
-
-    @on(Button.Pressed, "#capture-off")
-    def capture_off_button(self, _event):
-        self.action_toggle_capture_off()
 
     @on(Button.Pressed, "#capture-scene")
     def capture_scene_button(self, _event):

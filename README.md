@@ -87,7 +87,10 @@ non-secret daemon port metadata path. `AMARAN_TUI_VENV` can override the
 private Textual venv path for `ui`; set `AMARAN_TUI_BOOTSTRAP=0` to prevent
 automatic dependency installation. `AMARAN_TUI_STATUS_TIMEOUT` controls the
 per-fixture status timeout inside the TUI and defaults to the lower of
-`AMARAN_TIMEOUT` and `5`. `AMARAN_TUI_THEME` can be `auto`, `dark`, or `light`.
+`AMARAN_TIMEOUT` and `5`. `AMARAN_TUI_DEBOUNCE` controls how long the TUI waits
+before sending brightness, CCT, or G/M changes from sliders or keys, and
+defaults to `0.35`. `AMARAN_TUI_THEME` can be
+`auto`, `dark`, or `light`.
 The key-bearing file is the local state manifest, normally
 `~/Library/Application Support/amaran-cli/state.json`.
 
@@ -203,10 +206,11 @@ Open the local studio control surface with:
 The TUI lists known fixtures, refreshes live status, toggles power, adjusts
 brightness, CCT, and green-magenta correction, identifies a selected fixture,
 and applies or captures scenes. Scene capture is explicit: mark fixtures in the
-`cap` column to include them, and mark `off` for fixtures that should be saved
-as off without a live status read. Scene rows apply on activation. The TUI talks
-to the existing CLI commands and only consumes redacted JSON output; it does not
-read or display mesh, app, or device keys.
+`cap` column to include them. If an included fixture is currently shown as off,
+the TUI saves it with `--off-node`; otherwise it reads live status. Scene rows
+apply on activation. The TUI talks to the existing CLI commands and only
+consumes redacted JSON output; it does not read or display mesh, app, or device
+keys.
 
 The first run installs Textual into a private venv under
 `~/Library/Application Support/amaran-cli/python/tui` if Textual is not already
@@ -218,6 +222,9 @@ Use `AMARAN_TUI_VENV=/path/to/venv` to choose another venv, or
 Refresh-all uses a short per-fixture status timeout so stale fixtures are
 marked as errors quickly instead of making the interface feel stuck; override
 it with `AMARAN_TUI_STATUS_TIMEOUT=<seconds>`.
+Brightness, CCT, and G/M controls update the screen immediately and debounce
+runtime sends so dragging sliders or repeated keypresses collapse into one
+command; override the wait with `AMARAN_TUI_DEBOUNCE=<seconds>`.
 
 Useful keys:
 
@@ -227,11 +234,11 @@ Useful keys:
 | `r` / `R` | Refresh selected fixture / all fixtures. |
 | `space` | Toggle selected fixture on or off. |
 | `x` | Include or exclude the selected fixture from the next scene capture. |
-| `o` | Mark the selected included fixture as off for the next scene capture. |
 | `+` / `-` | Brightness up or down by 1%. |
 | `[` / `]` | CCT down or up by 100K. |
 | `{` / `}` | CCT down or up by 500K. |
 | `g` / `m` | Green/magenta correction down or up by 1. |
+| Arrow keys | Adjust the focused brightness, CCT, or G/M slider. |
 | `i` | Identify the selected fixture. |
 | `a` | Apply the selected scene. |
 | `c` | Capture checked fixtures into the scene name field. |

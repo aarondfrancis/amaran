@@ -205,6 +205,9 @@ Environment:
                                into the private venv when it is missing.
   AMARAN_TUI_STATUS_TIMEOUT    Per-fixture status timeout for ui refreshes.
                                Defaults to the lower of AMARAN_TIMEOUT and 5.
+  AMARAN_TUI_DEBOUNCE          Seconds to wait before sending ui brightness,
+                               CCT, or G/M changes from sliders or keys.
+                               Defaults to 0.35.
   AMARAN_TUI_THEME             Default ui theme: auto, dark, or light.
   The CLI does not load .env files. Do not store mesh, app, or device keys in
   environment variables; they belong only in the 0600 local state manifest.
