@@ -46,6 +46,7 @@ that mesh metadata from an encrypted local iPad backup.
 ./bin/amaran scene list
 ./bin/amaran scene show "recording scene"
 ./bin/amaran daemon status
+./bin/amaran ui
 ./bin/amaran list
 ./bin/amaran probe
 ./bin/amaran status
@@ -82,7 +83,9 @@ Environment variables are only convenience defaults such as `AMARAN_NODE_ID`,
 `AMARAN_TIMEOUT`, `AMARAN_CLI_STATE_PATH`, and the optional
 `AMARAN_IOS_BACKUP_PASSWORD` import helper. `AMARAN_DAEMON_DISABLE=1` forces
 the older one-shot helper path, and `AMARAN_DAEMON_PORT_FILE` overrides the
-non-secret daemon port metadata path. The key-bearing file is the local state
+non-secret daemon port metadata path. `AMARAN_TUI_VENV` can override the
+private Textual venv path for `ui`; set `AMARAN_TUI_BOOTSTRAP=0` to prevent
+automatic dependency installation. The key-bearing file is the local state
 manifest, normally
 `~/Library/Application Support/amaran-cli/state.json`.
 
@@ -186,6 +189,40 @@ requiring a status response, which is useful when an intentionally off fixture
 would otherwise time out. `scene apply` wakes each saved-on fixture first, then
 sends the saved look; saved-off fixtures receive `off`. Both commands use the
 mesh keys in local state, but command output remains redacted.
+
+## Terminal UI
+
+Open the local studio control surface with:
+
+```sh
+./bin/amaran ui
+```
+
+The TUI lists known fixtures, refreshes live status, toggles power, adjusts
+brightness, CCT, and green-magenta correction, identifies a selected fixture,
+and applies or captures scenes. It talks to the existing CLI commands and only
+consumes redacted JSON output; it does not read or display mesh, app, or device
+keys.
+
+The first run installs Textual into a private venv under
+`~/Library/Application Support/amaran-cli/python/tui` if Textual is not already
+available to `python3`. Use `AMARAN_TUI_VENV=/path/to/venv` to choose another
+venv, or `AMARAN_TUI_BOOTSTRAP=0` if you want dependency setup to fail fast.
+
+Useful keys:
+
+| Key | Action |
+| --- | --- |
+| `q` | Quit. |
+| `r` / `R` | Refresh selected fixture / all fixtures. |
+| `space` | Toggle selected fixture on or off. |
+| `+` / `-` | Brightness up or down by 1%. |
+| `[` / `]` | CCT down or up by 100K. |
+| `{` / `}` | CCT down or up by 500K. |
+| `g` / `m` | Green/magenta correction down or up by 1. |
+| `i` | Identify the selected fixture. |
+| `a` | Apply the selected scene. |
+| `c` | Capture the selected fixture into the scene name field. |
 
 ## Joining An Existing Mesh
 
@@ -313,6 +350,7 @@ one-shot helper path if the daemon cannot be reached.
 | `./bin/amaran cct <kelvin> [--intensity <0-100>] [--gm <0-20>] [--node <id-or-name>]` | Send Telink CCT. The CLI reads status to preserve any omitted intensity or green-magenta value. |
 | `./bin/amaran gm <0-20> [--node <id-or-name>]` | Send Sidus-style green-magenta correction while preserving current CCT and intensity. `10` is neutral, lower is greener, higher is more magenta. |
 | `./bin/amaran daemon [start\|status\|stop] [--json]` | Start, inspect, or stop the local runtime daemon without sending fixture control commands. Runtime commands auto-start it when needed. |
+| `./bin/amaran ui` | Open the Textual terminal control surface for fixtures and scenes. |
 
 State and pairing commands manage local state and fixture setup.
 

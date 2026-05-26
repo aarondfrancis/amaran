@@ -52,6 +52,7 @@ assert_contains "$HELP_OUTPUT" "amaran fixture rename <node> <friendly-name> [--
 assert_contains "$HELP_OUTPUT" "amaran scene capture <name> [--node <id|name>]" "help scene capture usage"
 assert_contains "$HELP_OUTPUT" "amaran scene apply <name> [--node <id|name>]" "help scene apply usage"
 assert_contains "$HELP_OUTPUT" "amaran daemon [start|status|stop]" "help daemon usage"
+assert_contains "$HELP_OUTPUT" "amaran ui" "help ui usage"
 assert_contains "$HELP_OUTPUT" "amaran monitor [--node <id|name>]" "help monitor usage"
 assert_contains "$HELP_OUTPUT" "amaran gm <0-20> [--node <id|name>]" "help gm usage"
 assert_contains "$HELP_OUTPUT" "control-test <on|off|intensity|cct|raw>" "help control-test raw usage"
@@ -67,6 +68,7 @@ assert_contains "$HELP_OUTPUT" "Sidus-first studio workflow" "help Sidus workflo
 assert_contains "$HELP_OUTPUT" "AMARAN_IOS_BACKUP_IMPORT_VENV" "help backup import venv env"
 assert_contains "$HELP_OUTPUT" "AMARAN_DAEMON_PORT_FILE" "help daemon port env"
 assert_contains "$HELP_OUTPUT" "AMARAN_DAEMON_DISABLE" "help daemon disable env"
+assert_contains "$HELP_OUTPUT" "AMARAN_TUI_VENV" "help tui venv env"
 assert_contains "$HELP_OUTPUT" "pair --add" "help pair add flow"
 assert_contains "$HELP_OUTPUT" "--dry-run" "help dry run option"
 assert_contains "$HELP_OUTPUT" "--verify" "help verify option"
@@ -127,6 +129,12 @@ if "$ROOT/bin/amaran" status --update-state >"$INVALID_UPDATE_STATE_OUTPUT" 2>&1
   fail "status --update-state should fail"
 fi
 assert_contains "$(cat "$INVALID_UPDATE_STATE_OUTPUT")" "--update-state is only supported for discover" "invalid update-state guard"
+
+INVALID_UI_JSON_OUTPUT="$TMPDIR/invalid-ui-json.out"
+if "$ROOT/bin/amaran" ui --json >"$INVALID_UI_JSON_OUTPUT" 2>&1; then
+  fail "ui --json should fail"
+fi
+assert_contains "$(cat "$INVALID_UI_JSON_OUTPUT")" "ui does not support --json" "invalid ui json guard"
 
 IDENTIFY_MISSING_STATE_OUTPUT="$TMPDIR/identify-missing-state.out"
 if "$ROOT/bin/amaran" identify --state-path "$TMPDIR/missing-identify-state.json" >"$IDENTIFY_MISSING_STATE_OUTPUT" 2>&1; then
@@ -466,6 +474,20 @@ if [fixture["node_address"] for fixture in fixtures] != [7, 9, 11]:
     raise SystemExit("scene fixture selection order was not preserved")
 if fixtures[2].get("sleep_mode") != 0:
     raise SystemExit("forced-off scene fixture did not store sleep_mode 0")
+PY
+SCENE_OFF_ONLY_OUTPUT="$("$ROOT/scripts/scene-store" --root "$FAKE_SCENE_ROOT" --state-path "$SCENE_MULTI_STATE" --off-node 11 capture "off only scene")"
+assert_contains "$SCENE_OFF_ONLY_OUTPUT" "captured scene 'off only scene' with 1 fixtures" "scene capture off-node-only count"
+python3 - "$SCENE_MULTI_STATE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+fixtures = payload["scenes"]["off only scene"]["fixtures"]
+if [fixture["node_address"] for fixture in fixtures] != [11]:
+    raise SystemExit("off-node-only capture should not capture every other fixture")
+if fixtures[0].get("sleep_mode") != 0:
+    raise SystemExit("off-node-only capture did not store sleep_mode 0")
 PY
 FAKE_SCENE_LOG="$TMPDIR/fake-scene.log"
 : > "$FAKE_SCENE_LOG"

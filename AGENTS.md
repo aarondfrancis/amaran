@@ -73,6 +73,7 @@ Useful commands:
 - `./bin/amaran scene show <name> --json`
 - `./bin/amaran daemon [start|status|stop]`
 - `./bin/amaran daemon [start|status|stop] --json`
+- `./bin/amaran ui`
 - `./bin/amaran list`
 - `./bin/amaran probe`
 - `./bin/amaran status`
@@ -101,6 +102,12 @@ Implementation notes:
   `~/Library/Application Support/amaran-cli/daemon.json`, keeps CoreBluetooth
   alive, and may reuse a Mesh Proxy connection for repeated commands. Set
   `AMARAN_DAEMON_DISABLE=1` to force the older one-shot helper path.
+- `./bin/amaran ui` launches `scripts/amaran-tui`, a Textual terminal control
+  surface backed by safe CLI JSON output. It should not read or print
+  mesh/app/device keys directly. It may auto-install Textual into a private
+  venv under `~/Library/Application Support/amaran-cli/python/tui`; set
+  `AMARAN_TUI_VENV` to override that path or `AMARAN_TUI_BOOTSTRAP=0` to
+  disable automatic dependency setup.
 - `./bin/amaran fixture rename <node> <friendly-name>` stores a CLI-only
   `friendly_name` on the selected fixture. Runtime commands, diagnostics, and
   scene commands should accept that friendly name anywhere `--node` is accepted.
@@ -178,7 +185,9 @@ Implementation notes:
   stores a local named scene in the top-level `scenes` object. Repeated
   `--node <id-or-name>` captures a selected fixture set. Repeated
   `--off-node <id-or-name>` records selected fixtures as off without sending a
-  status read, which avoids failures from intentionally off/asleep fixtures.
+  status read, which avoids failures from intentionally off/asleep fixtures. If
+  `--off-node` is passed without any `--node`, capture only those forced-off
+  fixtures rather than every other fixture in state.
   `scene apply` restores saved intensity/CCT/green-magenta/sleep state through
   direct runtime commands. For saved-on entries, it should send `on` before the
   saved intensity/CCT/green-magenta command so programmatically off fixtures
@@ -383,6 +392,9 @@ Development notes:
   `pair --dry-run`, `--state-path`, help text, and invalid `--dry-run`
   routing without launching `BluetoothProbe.app`, and checks that fake
   mesh/app/device keys are not printed by safe wrapper commands.
+- For TUI-only syntax checks, run
+  `python3 -m py_compile scripts/amaran-tui scripts/scene-store`; this does
+  not install Textual or launch BLE.
 - Config AppKey Add is longer than one unsegmented access message after TransMIC;
   send it only through the Config AppKey Add diagnostic, which uses the
   segmented send path and waits for the expected Segment Acknowledgment.

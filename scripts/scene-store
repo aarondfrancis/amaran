@@ -240,11 +240,16 @@ def cmd_capture(args):
         for fixture in off_fixtures
         if isinstance(fixture.get("node_address"), int)
     }
-    fixtures = [
-        fixture
-        for fixture in selected_fixtures(payload, args.node)
-        if fixture.get("node_address") not in off_addresses
-    ]
+    if args.node:
+        fixtures = [
+            fixture
+            for fixture in selected_fixtures(payload, args.node)
+            if fixture.get("node_address") not in off_addresses
+        ]
+    elif args.off_node:
+        fixtures = []
+    else:
+        fixtures = selected_fixtures(payload, args.node)
     if not fixtures and not off_fixtures:
         fail("local state has no fixtures")
 

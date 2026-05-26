@@ -48,6 +48,7 @@ Usage:
   amaran scene list [--json]
   amaran scene show <name> [--json]
   amaran daemon [start|status|stop] [--json]
+  amaran ui
   amaran monitor [--node <id|name>] [--timeout <sec>] [--json]
   amaran list [--json]
   amaran probe [--node <id|name>] [--json]
@@ -156,6 +157,8 @@ State and pairing:
                  records a fixture as off without requiring a status response.
                  Applying sends direct runtime commands.
   daemon         Start, inspect, or stop the local runtime daemon.
+  ui             Open a keyboard-friendly terminal control surface for known
+                 fixtures and saved scenes. Uses only redacted CLI JSON output.
   monitor        Subscribe to Mesh Proxy notifications for reverse-engineering
                  runtime packets. Output is redacted and key-free.
 
@@ -192,6 +195,9 @@ Environment:
                                Optional venv path for the encrypted backup
                                importer dependency. Defaults under
                                ~/Library/Application Support/amaran-cli.
+  AMARAN_TUI_VENV              Optional venv path for Textual, used by ui.
+  AMARAN_TUI_BOOTSTRAP         Set to 0 to prevent ui from installing Textual
+                               into the private venv when it is missing.
   The CLI does not load .env files. Do not store mesh, app, or device keys in
   environment variables; they belong only in the 0600 local state manifest.
 
@@ -238,6 +244,7 @@ Examples:
   ./bin/amaran fixture rename 6 desk-key
   ./bin/amaran scene capture "recording scene" --node <address-from-list>
   ./bin/amaran scene apply "recording scene" --node <address-from-list>
+  ./bin/amaran ui
   ./bin/amaran pair --dry-run --state-path /tmp/amaran-state.json
   ./bin/amaran pair --verify --state-path /tmp/amaran-state.json
   ./bin/amaran pair --add --verify
@@ -498,6 +505,11 @@ fi
 
 if [[ "$DISCOVER_UPDATE_STATE" == "1" && "$COMMAND" != "discover" ]]; then
   echo "amaran: --update-state is only supported for discover" >&2
+  exit 1
+fi
+
+if [[ "$JSON" == "1" && "$COMMAND" == "ui" ]]; then
+  echo "amaran: ui does not support --json" >&2
   exit 1
 fi
 
@@ -3904,6 +3916,10 @@ PY
   esac
 }
 
+run_tui_command() {
+  "$ROOT/scripts/amaran-tui" --root "$ROOT" --state-path "$STATE_PATH" --timeout "$TIMEOUT"
+}
+
 run_monitor_command() {
   if [[ ! -s "$STATE_PATH" ]]; then
     echo "amaran: monitor requires local state at $STATE_PATH" >&2
@@ -4086,6 +4102,9 @@ case "$COMMAND" in
     ;;
   daemon)
     run_daemon_command
+    ;;
+  ui)
+    run_tui_command
     ;;
   monitor)
     run_monitor_command

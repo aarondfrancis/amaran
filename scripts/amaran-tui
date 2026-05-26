@@ -1,0 +1,780 @@
+#!/usr/bin/env python3
+import argparse
+import asyncio
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional
+
+
+TEXTUAL_PACKAGE = "textual>=1.0,<2"
+BOOTSTRAP_ENV = "AMARAN_TUI_DEPS_BOOTSTRAPPED"
+
+
+def display_path(path):
+    home = str(Path.home())
+    absolute = os.path.abspath(os.path.expanduser(str(path)))
+    if absolute == home:
+        return "~"
+    if absolute.startswith(home + os.sep):
+        return "~" + absolute[len(home):]
+    return absolute
+
+
+def tui_venv():
+    configured = os.environ.get("AMARAN_TUI_VENV")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / "Library" / "Application Support" / "amaran-cli" / "python" / "tui"
+
+
+def fail_before_textual(message):
+    print(f"amaran: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def ensure_textual_dependency():
+    if importlib.util.find_spec("textual") is not None:
+        return
+
+    if os.environ.get("AMARAN_TUI_BOOTSTRAP") == "0":
+        fail_before_textual(
+            "Textual is required for the TUI; install it with "
+            f"`python3 -m pip install '{TEXTUAL_PACKAGE}'` or allow bootstrap"
+        )
+
+    if os.environ.get(BOOTSTRAP_ENV) == "1":
+        fail_before_textual(
+            "Textual dependency setup completed, but textual is still not importable"
+        )
+
+    venv_dir = tui_venv()
+    python_path = venv_dir / "bin" / "python"
+    try:
+        venv_dir.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        if not python_path.exists():
+            print(f"amaran: preparing TUI environment at {display_path(venv_dir)}", file=sys.stderr)
+            subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
+        print("amaran: installing TUI dependency", file=sys.stderr)
+        subprocess.run(
+            [
+                str(python_path),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-cache-dir",
+                "-q",
+                TEXTUAL_PACKAGE,
+            ],
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        fail_before_textual(f"TUI dependency setup failed with exit code {exc.returncode}")
+    except OSError as exc:
+        fail_before_textual(f"TUI dependency setup failed: {exc}")
+
+    env = dict(os.environ)
+    env[BOOTSTRAP_ENV] = "1"
+    os.execve(str(python_path), [str(python_path), str(Path(__file__).resolve()), *sys.argv[1:]], env)
+    raise AssertionError("unreachable")
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="Terminal UI for local amaran fixture control")
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--state-path", required=True)
+    parser.add_argument("--timeout", default="20")
+    return parser
+
+
+if any(arg in ("--help", "-h") for arg in sys.argv[1:]):
+    build_parser().parse_args()
+    raise SystemExit(0)
+
+ensure_textual_dependency()
+
+from textual import on
+from textual.app import App, ComposeResult
+from textual.containers import Horizontal, Vertical
+from textual.widgets import Button, DataTable, Footer, Header, Input, Log, Static
+
+
+class CommandError(Exception):
+    def __init__(self, command, message):
+        super().__init__(message)
+        self.command = command
+        self.message = message
+
+
+@dataclass
+class FixtureView:
+    name: str
+    address: int
+    mac: Optional[str] = None
+    friendly_name: Optional[str] = None
+    source_name: Optional[str] = None
+    status: str = "unknown"
+    power: str = "unknown"
+    intensity: Optional[float] = None
+    cct: Optional[int] = None
+    gm: Optional[int] = None
+    last_error: Optional[str] = None
+    pending: bool = False
+    updated_at: Optional[datetime] = None
+
+    @property
+    def selector(self):
+        return self.name or str(self.address)
+
+
+@dataclass
+class SceneView:
+    name: str
+    fixture_count: int
+    captured_at: Optional[str] = None
+
+
+class ValueBar(Static):
+    def set_value(self, label, value, minimum, maximum, suffix="", width=18):
+        if value is None:
+            self.update(f"{label:<10} [unknown]")
+            return
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            self.update(f"{label:<10} [unknown]")
+            return
+        numeric = max(float(minimum), min(float(maximum), numeric))
+        span = max(float(maximum) - float(minimum), 1.0)
+        filled = round(((numeric - float(minimum)) / span) * width)
+        filled = max(0, min(width, filled))
+        bar = "#" * filled + "-" * (width - filled)
+        if isinstance(value, float) and not value.is_integer():
+            rendered = f"{value:.1f}{suffix}"
+        else:
+            rendered = f"{int(value)}{suffix}"
+        self.update(f"{label:<10} [{bar}] {rendered}")
+
+
+class AmaranTui(App):
+    CSS = """
+    Screen {
+        layout: vertical;
+    }
+
+    #status-line {
+        height: 1;
+        padding: 0 1;
+        background: $panel;
+    }
+
+    #body {
+        height: 1fr;
+    }
+
+    #fixtures-panel {
+        width: 45%;
+        min-width: 42;
+        border: solid $primary;
+    }
+
+    #side-panel {
+        width: 55%;
+        min-width: 44;
+    }
+
+    #selected-panel {
+        height: 15;
+        border: solid $secondary;
+    }
+
+    #scenes-panel {
+        height: 12;
+        border: solid $accent;
+    }
+
+    #log-panel {
+        height: 1fr;
+        border: solid $primary-lighten-2;
+    }
+
+    .panel-title {
+        text-style: bold;
+        padding: 0 1;
+    }
+
+    .pad {
+        padding: 0 1;
+    }
+
+    .controls-row {
+        height: 3;
+        padding: 0 1;
+    }
+
+    Button {
+        min-width: 10;
+        margin: 0 1 0 0;
+    }
+
+    Input {
+        margin: 0 1 0 0;
+    }
+
+    DataTable {
+        height: 1fr;
+    }
+    """
+
+    BINDINGS = [
+        ("q", "quit", "Quit"),
+        ("r", "refresh_selected", "Refresh"),
+        ("R", "refresh_all", "Refresh all"),
+        ("space", "toggle_power", "On/off"),
+        ("i", "identify", "Identify"),
+        ("a", "apply_scene", "Apply scene"),
+        ("c", "capture_scene", "Capture"),
+        ("?", "show_help", "Help"),
+    ]
+
+    def __init__(self, root, state_path, timeout):
+        super().__init__()
+        self.root = Path(root).expanduser().resolve()
+        self.state_path = str(Path(state_path).expanduser())
+        self.timeout = str(timeout)
+        self.command_timeout = self._command_timeout(timeout)
+        self.fixtures: Dict[int, FixtureView] = {}
+        self.fixture_order: List[int] = []
+        self.scenes: List[SceneView] = []
+        self.scene_order: List[str] = []
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield Static("daemon: unknown    mesh: unknown    last refresh: never", id="status-line")
+        with Horizontal(id="body"):
+            with Vertical(id="fixtures-panel"):
+                yield Static("Fixtures", classes="panel-title")
+                yield DataTable(id="fixtures")
+            with Vertical(id="side-panel"):
+                with Vertical(id="selected-panel"):
+                    yield Static("Selected", id="selected-title", classes="panel-title")
+                    yield ValueBar(id="brightness", classes="pad")
+                    yield ValueBar(id="cct", classes="pad")
+                    yield ValueBar(id="gm", classes="pad")
+                    with Horizontal(classes="controls-row"):
+                        yield Button("On", id="power-on", variant="success")
+                        yield Button("Off", id="power-off", variant="error")
+                        yield Button("Refresh", id="refresh-selected")
+                        yield Button("Identify", id="identify")
+                with Vertical(id="scenes-panel"):
+                    yield Static("Scenes", classes="panel-title")
+                    yield DataTable(id="scenes")
+                    with Horizontal(classes="controls-row"):
+                        yield Button("Apply", id="apply-scene", variant="primary")
+                        yield Input(placeholder="scene name", id="scene-name")
+                        yield Button("Capture", id="capture-scene")
+                with Vertical(id="log-panel"):
+                    yield Static("Log", classes="panel-title")
+                    yield Log(id="log")
+        yield Footer()
+
+    async def on_mount(self):
+        fixtures = self.query_one("#fixtures", DataTable)
+        fixtures.cursor_type = "row"
+        fixtures.zebra_stripes = True
+        fixtures.add_columns("fixture", "addr", "state", "power", "int", "cct", "gm")
+
+        scenes = self.query_one("#scenes", DataTable)
+        scenes.cursor_type = "row"
+        scenes.zebra_stripes = True
+        scenes.add_columns("scene", "fixtures", "captured")
+
+        await self.load_initial()
+        fixtures.focus()
+
+    async def load_initial(self):
+        await self.refresh_daemon()
+        await self.load_fixtures()
+        await self.load_scenes()
+        self.update_selected_panel()
+
+    @staticmethod
+    def _command_timeout(value):
+        try:
+            return max(1.0, float(value))
+        except ValueError:
+            return 20.0
+
+    def append_log(self, message):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.query_one("#log", Log).write_line(f"{timestamp} {message}")
+
+    async def run_amaran(self, *args, expect_json=False, extra_timeout=5.0):
+        command = [
+            str(self.root / "bin" / "amaran"),
+            *[str(arg) for arg in args],
+            "--state-path",
+            self.state_path,
+            "--timeout",
+            self.timeout,
+        ]
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(self.root),
+        )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                process.communicate(),
+                timeout=self.command_timeout + extra_timeout,
+            )
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.communicate()
+            raise CommandError(command, f"command timed out after {self.command_timeout + extra_timeout:g}s")
+
+        stdout = stdout_b.decode("utf-8", errors="replace")
+        stderr = stderr_b.decode("utf-8", errors="replace")
+        if process.returncode != 0:
+            detail = (stderr or stdout).strip().splitlines()[-1:] or [f"exit {process.returncode}"]
+            raise CommandError(command, detail[0])
+        if expect_json:
+            try:
+                return json.loads(stdout)
+            except json.JSONDecodeError as exc:
+                raise CommandError(command, f"invalid JSON: line {exc.lineno} column {exc.colno}")
+        return stdout.strip()
+
+    async def refresh_daemon(self):
+        try:
+            payload = await self.run_amaran("daemon", "status", "--json", expect_json=True)
+            data = payload.get("data") or {}
+            daemon = data.get("daemon") or {}
+            state = data.get("central_state", "unknown")
+            connected = "yes" if data.get("connected") else "no"
+            self.query_one("#status-line", Static).update(
+                f"daemon: running pid {daemon.get('pid', '?')}    bluetooth: {state}    connected: {connected}"
+            )
+        except CommandError as exc:
+            self.query_one("#status-line", Static).update(f"daemon: unavailable    {exc.message}")
+
+    async def load_fixtures(self):
+        try:
+            rows = await self.run_amaran("list", "--json", expect_json=True)
+        except CommandError as exc:
+            self.append_log(f"fixture load failed: {exc.message}")
+            return
+
+        previous = self.fixtures
+        self.fixtures = {}
+        self.fixture_order = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            try:
+                address = int(row.get("address"))
+            except (TypeError, ValueError):
+                continue
+            prior = previous.get(address)
+            fixture = FixtureView(
+                name=str(row.get("name") or f"fixture-{address}"),
+                friendly_name=row.get("friendly_name"),
+                source_name=row.get("source_name"),
+                address=address,
+                mac=row.get("mac"),
+            )
+            if prior:
+                fixture.status = prior.status
+                fixture.power = prior.power
+                fixture.intensity = prior.intensity
+                fixture.cct = prior.cct
+                fixture.gm = prior.gm
+                fixture.last_error = prior.last_error
+                fixture.pending = prior.pending
+                fixture.updated_at = prior.updated_at
+            self.fixtures[address] = fixture
+            self.fixture_order.append(address)
+        self.render_fixtures()
+        self.append_log(f"loaded {len(self.fixture_order)} fixtures")
+
+    async def load_scenes(self):
+        try:
+            payload = await self.run_amaran("scene", "list", "--json", expect_json=True)
+        except CommandError as exc:
+            self.append_log(f"scene load failed: {exc.message}")
+            return
+        self.scenes = []
+        self.scene_order = []
+        for row in payload.get("scenes", []) if isinstance(payload, dict) else []:
+            if not isinstance(row, dict):
+                continue
+            name = row.get("name")
+            if not name:
+                continue
+            scene = SceneView(
+                name=str(name),
+                fixture_count=int(row.get("fixture_count") or 0),
+                captured_at=row.get("captured_at"),
+            )
+            self.scenes.append(scene)
+            self.scene_order.append(scene.name)
+        self.render_scenes()
+        self.append_log(f"loaded {len(self.scenes)} scenes")
+
+    def render_fixtures(self):
+        table = self.query_one("#fixtures", DataTable)
+        table.clear()
+        for address in self.fixture_order:
+            fixture = self.fixtures[address]
+            table.add_row(
+                fixture.name,
+                str(address),
+                self.render_status(fixture),
+                fixture.power,
+                self.render_percent(fixture.intensity),
+                f"{fixture.cct}K" if fixture.cct is not None else "?",
+                str(fixture.gm) if fixture.gm is not None else "?",
+                key=str(address),
+            )
+
+    def render_scenes(self):
+        table = self.query_one("#scenes", DataTable)
+        table.clear()
+        for scene in self.scenes:
+            captured = scene.captured_at or "unknown"
+            if len(captured) > 19:
+                captured = captured[:19]
+            table.add_row(scene.name, str(scene.fixture_count), captured, key=scene.name)
+
+    @staticmethod
+    def render_status(fixture):
+        if fixture.pending:
+            return "pending"
+        if fixture.status == "error":
+            return "error"
+        return fixture.status
+
+    @staticmethod
+    def render_percent(value):
+        if value is None:
+            return "?"
+        if isinstance(value, float) and not value.is_integer():
+            return f"{value:.1f}%"
+        return f"{int(value)}%"
+
+    def current_fixture(self):
+        if not self.fixture_order:
+            return None
+        table = self.query_one("#fixtures", DataTable)
+        row = max(0, min(table.cursor_row, len(self.fixture_order) - 1))
+        return self.fixtures.get(self.fixture_order[row])
+
+    def current_scene(self):
+        if not self.scene_order:
+            return None
+        table = self.query_one("#scenes", DataTable)
+        row = max(0, min(table.cursor_row, len(self.scene_order) - 1))
+        return self.scene_order[row]
+
+    def update_selected_panel(self):
+        fixture = self.current_fixture()
+        title = self.query_one("#selected-title", Static)
+        brightness = self.query_one("#brightness", ValueBar)
+        cct = self.query_one("#cct", ValueBar)
+        gm = self.query_one("#gm", ValueBar)
+        if fixture is None:
+            title.update("Selected")
+            brightness.set_value("Brightness", None, 0, 100, "%")
+            cct.set_value("Temp", None, 2000, 10000, "K")
+            gm.set_value("G/M", None, 0, 20)
+            return
+        detail = f"{fixture.name}  addr {fixture.address}  {fixture.status}"
+        if fixture.last_error:
+            detail += f"  error: {fixture.last_error}"
+        title.update(detail)
+        brightness.set_value("Brightness", fixture.intensity, 0, 100, "%")
+        cct.set_value("Temp", fixture.cct, 2000, 10000, "K")
+        gm.set_value("G/M", fixture.gm, 0, 20)
+
+    async def refresh_fixture(self, fixture):
+        fixture.pending = True
+        fixture.last_error = None
+        self.render_fixtures()
+        self.update_selected_panel()
+        try:
+            payload = await self.run_amaran("status", "--json", "--node", fixture.selector, expect_json=True)
+            cct = payload.get("cct") or {}
+            fixture.status = "online"
+            fixture.power = "off" if cct.get("sleep_mode") == 0 else "on"
+            intensity = cct.get("intensity_percent")
+            if intensity is None and isinstance(cct.get("intensity"), (int, float)):
+                intensity = float(cct["intensity"]) / 10.0
+            fixture.intensity = float(intensity) if intensity is not None else None
+            fixture.cct = int(cct["cct"]) if cct.get("cct") is not None else fixture.cct
+            fixture.gm = int(cct["gm"]) if cct.get("gm") is not None else fixture.gm
+            fixture.updated_at = datetime.now()
+            self.append_log(f"status {fixture.name}: {fixture.power}, {self.render_percent(fixture.intensity)}, {fixture.cct or '?'}K, gm {fixture.gm if fixture.gm is not None else '?'}")
+        except CommandError as exc:
+            fixture.status = "error"
+            fixture.power = "unknown"
+            fixture.last_error = exc.message
+            self.append_log(f"status {fixture.name} failed: {exc.message}")
+        finally:
+            fixture.pending = False
+            self.render_fixtures()
+            self.update_selected_panel()
+
+    async def control_fixture(self, fixture, command, *args):
+        fixture.pending = True
+        fixture.last_error = None
+        self.render_fixtures()
+        self.update_selected_panel()
+        try:
+            await self.run_amaran(command, *args, "--node", fixture.selector)
+            if command == "on":
+                fixture.power = "on"
+                fixture.status = "online"
+            elif command == "off":
+                fixture.power = "off"
+                fixture.status = "online"
+            elif command == "intensity":
+                fixture.intensity = float(args[0])
+                fixture.power = "on"
+                fixture.status = "online"
+            elif command == "cct":
+                fixture.cct = int(args[0])
+                if "--intensity" in args:
+                    index = args.index("--intensity")
+                    fixture.intensity = float(args[index + 1])
+                if "--gm" in args:
+                    index = args.index("--gm")
+                    fixture.gm = int(args[index + 1])
+                fixture.power = "on"
+                fixture.status = "online"
+            elif command == "gm":
+                fixture.gm = int(args[0])
+                fixture.power = "on"
+                fixture.status = "online"
+            fixture.updated_at = datetime.now()
+            rendered = " ".join([command, *[str(arg) for arg in args]]).strip()
+            self.append_log(f"sent {fixture.name}: {rendered}")
+        except CommandError as exc:
+            fixture.status = "error"
+            fixture.last_error = exc.message
+            self.append_log(f"control {fixture.name} failed: {exc.message}")
+        finally:
+            fixture.pending = False
+            self.render_fixtures()
+            self.update_selected_panel()
+
+    async def set_cct_bundle(self, fixture, cct=None, intensity=None, gm=None):
+        next_cct = int(cct if cct is not None else fixture.cct if fixture.cct is not None else 5600)
+        next_intensity = float(
+            intensity if intensity is not None else fixture.intensity if fixture.intensity is not None else 50
+        )
+        next_gm = int(gm if gm is not None else fixture.gm if fixture.gm is not None else 10)
+        next_cct = max(2000, min(10000, next_cct))
+        next_intensity = max(0, min(100, next_intensity))
+        next_gm = max(0, min(20, next_gm))
+        await self.control_fixture(
+            fixture,
+            "cct",
+            str(next_cct),
+            "--intensity",
+            f"{next_intensity:g}",
+            "--gm",
+            str(next_gm),
+        )
+
+    def schedule(self, coro):
+        asyncio.create_task(coro)
+
+    async def action_refresh_selected(self):
+        fixture = self.current_fixture()
+        if fixture:
+            await self.refresh_fixture(fixture)
+
+    async def action_refresh_all(self):
+        self.append_log("refreshing all fixtures")
+        for address in list(self.fixture_order):
+            fixture = self.fixtures.get(address)
+            if fixture:
+                await self.refresh_fixture(fixture)
+
+    async def action_toggle_power(self):
+        fixture = self.current_fixture()
+        if not fixture:
+            return
+        if fixture.power == "on":
+            await self.control_fixture(fixture, "off")
+        else:
+            await self.control_fixture(fixture, "on")
+
+    async def action_identify(self):
+        fixture = self.current_fixture()
+        if not fixture:
+            return
+        fixture.pending = True
+        self.render_fixtures()
+        try:
+            await self.run_amaran("identify", "--node", fixture.selector, extra_timeout=self.command_timeout + 10)
+            self.append_log(f"identified {fixture.name}")
+        except CommandError as exc:
+            fixture.status = "error"
+            fixture.last_error = exc.message
+            self.append_log(f"identify {fixture.name} failed: {exc.message}")
+        finally:
+            fixture.pending = False
+            self.render_fixtures()
+            self.update_selected_panel()
+
+    async def action_apply_scene(self):
+        scene = self.current_scene()
+        if not scene:
+            self.append_log("no scene selected")
+            return
+        self.append_log(f"applying scene {scene}")
+        try:
+            await self.run_amaran("scene", "apply", scene, extra_timeout=self.command_timeout * 2)
+            self.append_log(f"applied scene {scene}")
+            for fixture in self.fixtures.values():
+                fixture.status = "unknown"
+                fixture.power = "unknown"
+            self.render_fixtures()
+            self.update_selected_panel()
+        except CommandError as exc:
+            self.append_log(f"scene apply failed: {exc.message}")
+
+    async def action_capture_scene(self):
+        await self.capture_scene()
+
+    def action_show_help(self):
+        self.append_log("keys: q quit, r refresh, R refresh all, space on/off, +/- brightness, [] temp, g/m G/M, a apply scene, c capture, i identify")
+
+    async def adjust_brightness(self, delta):
+        fixture = self.current_fixture()
+        if not fixture:
+            return
+        current = fixture.intensity if fixture.intensity is not None else 50
+        await self.set_cct_bundle(fixture, intensity=current + delta)
+
+    async def adjust_cct(self, delta):
+        fixture = self.current_fixture()
+        if not fixture:
+            return
+        current = fixture.cct if fixture.cct is not None else 5600
+        await self.set_cct_bundle(fixture, cct=current + delta)
+
+    async def adjust_gm(self, delta):
+        fixture = self.current_fixture()
+        if not fixture:
+            return
+        current = fixture.gm if fixture.gm is not None else 10
+        await self.set_cct_bundle(fixture, gm=current + delta)
+
+    async def capture_scene(self):
+        fixture = self.current_fixture()
+        if not fixture:
+            self.append_log("no fixture selected")
+            return
+        name = self.query_one("#scene-name", Input).value.strip()
+        if not name:
+            self.append_log("enter a scene name before capture")
+            return
+        selector_flag = "--off-node" if fixture.power == "off" else "--node"
+        try:
+            await self.run_amaran("scene", "capture", name, selector_flag, fixture.selector, extra_timeout=self.command_timeout * 2)
+            self.append_log(f"captured {name} from {fixture.name}")
+            await self.load_scenes()
+        except CommandError as exc:
+            self.append_log(f"scene capture failed: {exc.message}")
+
+    @on(DataTable.RowHighlighted, "#fixtures")
+    def fixture_highlighted(self, _event):
+        self.update_selected_panel()
+
+    @on(DataTable.RowSelected, "#fixtures")
+    def fixture_selected(self, _event):
+        self.update_selected_panel()
+
+    @on(DataTable.RowSelected, "#scenes")
+    def scene_selected(self, _event):
+        self.schedule(self.action_apply_scene())
+
+    @on(Button.Pressed, "#refresh-selected")
+    def refresh_button(self, _event):
+        self.schedule(self.action_refresh_selected())
+
+    @on(Button.Pressed, "#power-on")
+    def on_button(self, _event):
+        fixture = self.current_fixture()
+        if fixture:
+            self.schedule(self.control_fixture(fixture, "on"))
+
+    @on(Button.Pressed, "#power-off")
+    def off_button(self, _event):
+        fixture = self.current_fixture()
+        if fixture:
+            self.schedule(self.control_fixture(fixture, "off"))
+
+    @on(Button.Pressed, "#identify")
+    def identify_button(self, _event):
+        self.schedule(self.action_identify())
+
+    @on(Button.Pressed, "#apply-scene")
+    def apply_scene_button(self, _event):
+        self.schedule(self.action_apply_scene())
+
+    @on(Button.Pressed, "#capture-scene")
+    def capture_scene_button(self, _event):
+        self.schedule(self.capture_scene())
+
+    @on(Input.Submitted, "#scene-name")
+    def scene_name_submitted(self, _event):
+        self.schedule(self.capture_scene())
+
+    async def on_key(self, event):
+        if isinstance(self.focused, Input):
+            return
+        char = event.character
+        if char in ("+", "="):
+            event.stop()
+            await self.adjust_brightness(1)
+        elif char == "-":
+            event.stop()
+            await self.adjust_brightness(-1)
+        elif char == "]":
+            event.stop()
+            await self.adjust_cct(100)
+        elif char == "[":
+            event.stop()
+            await self.adjust_cct(-100)
+        elif char == "}":
+            event.stop()
+            await self.adjust_cct(500)
+        elif char == "{":
+            event.stop()
+            await self.adjust_cct(-500)
+        elif char == "m":
+            event.stop()
+            await self.adjust_gm(1)
+        elif char == "g":
+            event.stop()
+            await self.adjust_gm(-1)
+
+
+def main():
+    args = build_parser().parse_args()
+    app = AmaranTui(args.root, args.state_path, args.timeout)
+    app.run()
+
+
+if __name__ == "__main__":
+    main()
