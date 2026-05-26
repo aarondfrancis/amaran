@@ -109,7 +109,7 @@ from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, Footer, Header, Input, Log, Static
+from textual.widgets import Button, DataTable, Footer, Header, Log, Static
 
 
 class CommandError(Exception):
@@ -145,6 +145,168 @@ class SceneView:
     name: str
     fixture_count: int
     captured_at: Optional[str] = None
+
+
+SCENE_NAME_WIDTH = 14
+SCENE_FIXTURE_WIDTH = 9
+SCENE_CAPTURED_WIDTH = 19
+
+
+def scene_row_text(name, fixture_count, captured, selected=False):
+    line = (
+        f" {name:<{SCENE_NAME_WIDTH}}"
+        f"{str(fixture_count):<{SCENE_FIXTURE_WIDTH}}"
+        f"{captured:<{SCENE_CAPTURED_WIDTH}}"
+    )
+    text = Text(line.rstrip())
+    if selected:
+        text.stylize("reverse")
+    return text
+
+
+class SceneList(Static):
+    can_focus = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.scenes: List[SceneView] = []
+        self.selected_index = 0
+
+    def set_scenes(self, scenes, selected_index=0):
+        self.scenes = list(scenes)
+        if self.scenes:
+            self.selected_index = max(0, min(selected_index, len(self.scenes) - 1))
+        else:
+            self.selected_index = 0
+        self.render_scenes()
+
+    def render_scenes(self):
+        lines = [scene_row_text("scene", "fixtures", "captured")]
+        for index, scene in enumerate(self.scenes):
+            captured = scene.captured_at or "unknown"
+            if len(captured) > SCENE_CAPTURED_WIDTH:
+                captured = captured[:SCENE_CAPTURED_WIDTH]
+            lines.append(
+                scene_row_text(
+                    scene.name,
+                    scene.fixture_count,
+                    captured,
+                    selected=index == self.selected_index,
+                )
+            )
+        self.update(Text("\n").join(lines))
+
+    def selected_scene(self):
+        if not self.scenes:
+            return None
+        return self.scenes[self.selected_index].name
+
+    def move_selection(self, delta):
+        if not self.scenes:
+            return
+        self.selected_index = max(0, min(len(self.scenes) - 1, self.selected_index + delta))
+        self.render_scenes()
+
+    def on_click(self, event):
+        row = int(getattr(event, "y", 0)) - 1
+        if 0 <= row < len(self.scenes):
+            self.selected_index = row
+            self.render_scenes()
+            app = self.app
+            if hasattr(app, "schedule") and hasattr(app, "action_apply_scene"):
+                app.schedule(app.action_apply_scene())
+            event.stop()
+
+    def on_key(self, event):
+        if event.key == "up":
+            self.move_selection(-1)
+            event.stop()
+        elif event.key == "down":
+            self.move_selection(1)
+            event.stop()
+        elif event.key in ("enter", "space"):
+            app = self.app
+            if hasattr(app, "schedule") and hasattr(app, "action_apply_scene"):
+                app.schedule(app.action_apply_scene())
+            event.stop()
+
+
+class SceneNameField(Static):
+    can_focus = True
+
+    def __init__(self, *args, placeholder="scene name", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.placeholder = placeholder
+        self.value = ""
+        self.cursor = 0
+
+    def on_mount(self):
+        self.render_value()
+
+    def render_value(self):
+        text = Text()
+        if self.value:
+            before = self.value[: self.cursor]
+            current = self.value[self.cursor : self.cursor + 1]
+            after = self.value[self.cursor + 1 :]
+            text.append(before)
+            if self.has_focus:
+                text.append(current or " ", style="reverse")
+            else:
+                text.append(current)
+            text.append(after)
+        else:
+            if self.has_focus:
+                text.append(" ", style="reverse")
+            text.append(self.placeholder, style="dim")
+        self.update(text)
+
+    def on_focus(self):
+        self.render_value()
+
+    def on_blur(self):
+        self.render_value()
+
+    def on_key(self, event):
+        key = event.key
+        character = event.character
+        if key == "enter":
+            app = self.app
+            if hasattr(app, "schedule") and hasattr(app, "capture_scene"):
+                app.schedule(app.capture_scene())
+            event.stop()
+        elif key == "left":
+            self.cursor = max(0, self.cursor - 1)
+            self.render_value()
+            event.stop()
+        elif key == "right":
+            self.cursor = min(len(self.value), self.cursor + 1)
+            self.render_value()
+            event.stop()
+        elif key == "home":
+            self.cursor = 0
+            self.render_value()
+            event.stop()
+        elif key == "end":
+            self.cursor = len(self.value)
+            self.render_value()
+            event.stop()
+        elif key == "backspace":
+            if self.cursor:
+                self.value = self.value[: self.cursor - 1] + self.value[self.cursor :]
+                self.cursor -= 1
+                self.render_value()
+            event.stop()
+        elif key == "delete":
+            if self.cursor < len(self.value):
+                self.value = self.value[: self.cursor] + self.value[self.cursor + 1 :]
+                self.render_value()
+            event.stop()
+        elif character and character.isprintable() and character not in "\r\n\t":
+            self.value = self.value[: self.cursor] + character + self.value[self.cursor :]
+            self.cursor += len(character)
+            self.render_value()
+            event.stop()
 
 
 class ValueBar(Static):
@@ -434,10 +596,21 @@ class AmaranTui(App):
         padding: 0;
     }
 
+    #scenes {
+        height: 1fr;
+        padding: 0;
+    }
+
     #scene-name {
         width: 1fr;
+        height: 3;
+        border: tall $surface-lighten-1;
         padding: 0;
-        margin: 0 1 0 1;
+        margin: 0 1 0 0;
+    }
+
+    #scene-name:focus {
+        border: tall $accent;
     }
 
     #capture-scene {
@@ -448,10 +621,6 @@ class AmaranTui(App):
 
     Button {
         min-width: 10;
-        margin: 0 1 0 0;
-    }
-
-    Input {
         margin: 0 1 0 0;
     }
 
@@ -495,6 +664,7 @@ class AmaranTui(App):
         self.capture_include = set()
         self.scenes: List[SceneView] = []
         self.scene_order: List[str] = []
+        self.selected_scene_index = 0
         self.refresh_all_task = None
         self.control_generations = {}
         self.control_workers = {}
@@ -524,9 +694,9 @@ class AmaranTui(App):
                         yield Button("Capture", id="capture-include")
                 with Vertical(id="scenes-panel"):
                     yield Static("Scenes", classes="panel-title")
-                    yield DataTable(id="scenes")
+                    yield SceneList(id="scenes")
                     with Horizontal(id="scene-editor"):
-                        yield Input(placeholder="scene name", id="scene-name")
+                        yield SceneNameField(id="scene-name")
                         yield Button("Save Scene", id="capture-scene")
                 with Vertical(id="log-panel"):
                     yield Static("Log", classes="panel-title")
@@ -538,11 +708,6 @@ class AmaranTui(App):
         fixtures.cursor_type = "row"
         fixtures.zebra_stripes = True
         fixtures.add_columns("fixture", "addr", "cap", "state", "power", "int", "cct", "gm")
-
-        scenes = self.query_one("#scenes", DataTable)
-        scenes.cursor_type = "row"
-        scenes.zebra_stripes = True
-        scenes.add_columns("scene", "fixtures", "captured")
 
         await self.load_initial()
         fixtures.focus()
@@ -722,13 +887,9 @@ class AmaranTui(App):
             table.move_cursor(row=self.fixture_order.index(selected_address), column=0, animate=False, scroll=False)
 
     def render_scenes(self):
-        table = self.query_one("#scenes", DataTable)
-        table.clear()
-        for scene in self.scenes:
-            captured = scene.captured_at or "unknown"
-            if len(captured) > 19:
-                captured = captured[:19]
-            table.add_row(scene.name, str(scene.fixture_count), captured, key=scene.name)
+        table = self.query_one("#scenes", SceneList)
+        table.set_scenes(self.scenes, self.selected_scene_index)
+        self.selected_scene_index = table.selected_index
 
     @staticmethod
     def render_status(fixture):
@@ -776,11 +937,9 @@ class AmaranTui(App):
         self.selected_address = self.fixture_order[row]
 
     def current_scene(self):
-        if not self.scene_order:
-            return None
-        table = self.query_one("#scenes", DataTable)
-        row = max(0, min(table.cursor_row, len(self.scene_order) - 1))
-        return self.scene_order[row]
+        table = self.query_one("#scenes", SceneList)
+        self.selected_scene_index = table.selected_index
+        return table.selected_scene()
 
     def update_selected_panel(self):
         fixture = self.current_fixture()
@@ -1096,7 +1255,7 @@ class AmaranTui(App):
         if not fixture:
             self.append_log("no fixture selected")
             return
-        name = self.query_one("#scene-name", Input).value.strip()
+        name = self.query_one("#scene-name", SceneNameField).value.strip()
         if not name:
             self.append_log("enter a scene name before capture")
             return
@@ -1135,10 +1294,6 @@ class AmaranTui(App):
         self.update_selected_fixture_from_table(event)
         self.update_selected_panel()
 
-    @on(DataTable.RowSelected, "#scenes")
-    def scene_selected(self, _event):
-        self.schedule(self.action_apply_scene())
-
     @on(Button.Pressed, "#refresh-selected")
     def refresh_button(self, _event):
         self.schedule(self.action_refresh_selected())
@@ -1167,12 +1322,8 @@ class AmaranTui(App):
     def capture_scene_button(self, _event):
         self.schedule(self.capture_scene())
 
-    @on(Input.Submitted, "#scene-name")
-    def scene_name_submitted(self, _event):
-        self.schedule(self.capture_scene())
-
     async def on_key(self, event):
-        if isinstance(self.focused, Input):
+        if isinstance(self.focused, SceneNameField):
             return
         char = event.character
         if char in ("+", "="):
