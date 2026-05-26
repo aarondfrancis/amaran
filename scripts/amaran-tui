@@ -517,10 +517,7 @@ class CompactButton(Static):
         self.render_label()
 
     def render_label(self):
-        text = Text(self.label, style="bold")
-        if self.has_focus:
-            text.stylize("reverse")
-        self.update(text)
+        self.update(Text(self.label, style="bold"))
 
     def on_focus(self):
         self.render_label()
@@ -800,6 +797,11 @@ class AmaranTui(App):
 
     CompactButton.action-neutral {
         background: $surface-lighten-1;
+        color: $text;
+    }
+
+    CompactButton:focus {
+        background: $accent;
         color: $text;
     }
 
