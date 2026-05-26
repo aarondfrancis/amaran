@@ -1514,7 +1514,8 @@ class AmaranTui(App):
         if not fixture:
             self.append_log("no fixture selected")
             return
-        name = self.query_one("#scene-name", SceneNameField).value.strip()
+        name_field = self.query_one("#scene-name", SceneNameField)
+        name = name_field.value.strip()
         if not name:
             self.append_log("enter a scene name before capture")
             return
@@ -1539,6 +1540,9 @@ class AmaranTui(App):
         try:
             await self.run_amaran(*command, extra_timeout=self.command_timeout * 2)
             self.append_log(f"captured {name}: {live_count} live, {off_count} off")
+            name_field.value = ""
+            name_field.cursor = 0
+            name_field.render_value()
             await self.load_scenes()
         except CommandError as exc:
             self.append_log(f"scene capture failed: {exc.message}")
