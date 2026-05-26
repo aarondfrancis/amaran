@@ -105,6 +105,7 @@ if any(arg in ("--help", "-h") for arg in sys.argv[1:]):
 
 ensure_textual_dependency()
 
+from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -156,11 +157,11 @@ class ValueBar(Static):
         self.minimum = 0.0
         self.maximum = 100.0
         self.suffix = ""
-        self.width = 18
+        self.width = 30
         self.step = 1.0
         self.kind = ""
 
-    def set_value(self, label, value, minimum, maximum, suffix="", width=18, step=1, kind=""):
+    def set_value(self, label, value, minimum, maximum, suffix="", width=30, step=1, kind=""):
         self.label = label
         self.value = value
         self.minimum = float(minimum)
@@ -172,24 +173,51 @@ class ValueBar(Static):
         self.render_value()
 
     def render_value(self):
+        text = Text()
         if self.value is None:
-            self.update(f"{self.focus_marker()}{self.label:<10} [unknown]")
+            text.append(self.value_prefix("unknown"))
+            text.append("[")
+            text.append("-" * self.width, style="dim")
+            text.append("]")
+            self.update(text)
             return
         try:
             numeric = float(self.value)
         except (TypeError, ValueError):
-            self.update(f"{self.focus_marker()}{self.label:<10} [unknown]")
+            text.append(self.value_prefix("unknown"))
+            text.append("[")
+            text.append("-" * self.width, style="dim")
+            text.append("]")
+            self.update(text)
             return
         numeric = max(self.minimum, min(self.maximum, numeric))
         span = max(self.maximum - self.minimum, 1.0)
-        filled = round(((numeric - self.minimum) / span) * self.width)
-        filled = max(0, min(self.width, filled))
-        bar = "#" * filled + "-" * (self.width - filled)
-        if isinstance(self.value, float) and not self.value.is_integer():
-            rendered = f"{self.value:.1f}{self.suffix}"
-        else:
-            rendered = f"{int(self.value)}{self.suffix}"
-        self.update(f"{self.focus_marker()}{self.label:<10} [{bar}] {rendered}")
+        handle = round(((numeric - self.minimum) / span) * (self.width - 1))
+        handle = max(0, min(self.width - 1, handle))
+        rendered = self.rendered_value()
+        text.append(self.value_prefix(rendered))
+        text.append("[")
+        if handle:
+            text.append("=" * handle, style="green")
+        text.append("o", style="bold")
+        if handle < self.width - 1:
+            text.append("-" * ((self.width - 1) - handle), style="dim")
+        text.append("]")
+        self.update(text)
+
+    def rendered_value(self):
+        if self.value is None:
+            return "unknown"
+        try:
+            numeric = float(self.value)
+        except (TypeError, ValueError):
+            return "unknown"
+        if isinstance(self.value, float) and not numeric.is_integer():
+            return f"{numeric:.1f}{self.suffix}"
+        return f"{int(numeric)}{self.suffix}"
+
+    def value_prefix(self, rendered):
+        return f"{self.focus_marker()}{self.label:<10} {rendered:>8} "
 
     def focus_marker(self):
         return ">" if self.has_focus else " "
@@ -201,7 +229,7 @@ class ValueBar(Static):
         self.render_value()
 
     def value_from_x(self, x):
-        start = 13
+        start = len(self.value_prefix(self.rendered_value())) + 1
         end = start + max(self.width - 1, 1)
         ratio = (max(start, min(end, int(x))) - start) / max(end - start, 1)
         raw = self.minimum + (ratio * (self.maximum - self.minimum))
