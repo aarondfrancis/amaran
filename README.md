@@ -140,13 +140,17 @@ can scan candidate unicast addresses and optionally keep responsive fixtures:
 ./bin/amaran discover --range 2-64 --update-state
 ```
 
-`discover` uses the existing NetKey/AppKey and status command to find addresses
-that answer on the current mesh. It can add runtime control entries, but it
-cannot recover new DeviceKeys or Sidus-only metadata. If the scan range includes
-the CLI-owned Config source address, discovery moves that source address before
+`discover` uses the existing NetKey/AppKey and batched vendor status reads to
+find addresses that answer on the current mesh. The normal path sends the whole
+range over one Mesh Proxy connection, so `--timeout` is the batch window rather
+than a per-address delay. It can add runtime control entries, but it cannot
+recover new DeviceKeys or Sidus-only metadata. If the scan range includes the
+CLI-owned Config source address, discovery moves that source address before
 probing so an iPad-assigned fixture at that address is not skipped. Take a fresh
 encrypted iPad backup and rerun `sidus-import --replace` when you need updated
 names, MACs, DeviceKeys, app metadata, or if Sidus creates a new mesh/AppKey.
+Because discovery uses the same status read as `status`, a fixture that is
+powered but programmatically off/asleep may not answer until it is woken.
 
 Local fixture names are for the CLI only:
 

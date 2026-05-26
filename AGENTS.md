@@ -160,14 +160,20 @@ Implementation notes:
   can work, but Config diagnostics and node reset must fail before sending
   DeviceKey traffic for those fixtures.
 - `./bin/amaran discover --range <spec>` probes candidate fixture unicast
-  addresses on the current imported mesh using vendor status reads. It may
-  advance sequence counters. Without `--update-state`, it should remove
-  temporary candidate fixtures after probing; with `--update-state`, responsive
-  new addresses may remain as control-only fixtures. It cannot recover new
-  DeviceKeys, names, MACs, groups, or Sidus scenes; use a fresh Sidus backup
-  import for that metadata. If the scan range includes the CLI-owned Config
-  source address, discovery should relocate that source address before probing
-  so a later iPad-assigned fixture at that address is not skipped.
+  addresses on the current imported mesh using batched vendor status reads. The
+  normal repo path should launch `BluetoothProbe.app` once, reserve a sequence
+  block, send the whole range over one Mesh Proxy connection, and update state
+  once. It may advance sequence counters. Without `--update-state`, discovered
+  candidate fixtures must not remain in state; with `--update-state`,
+  responsive new addresses may remain as control-only fixtures. It cannot
+  recover new DeviceKeys, names, MACs, groups, or Sidus scenes; use a fresh
+  Sidus backup import for that metadata. If the scan range includes the
+  CLI-owned Config source address, discovery should relocate that source address
+  before probing so a later iPad-assigned fixture at that address is not
+  skipped. Because discovery uses the same status read as `status`,
+  programmatically off/asleep fixtures may not answer until woken. The script
+  may keep its old sequential path only as a fallback for tests or environments
+  without the app bundle.
 - `./bin/amaran scene capture <name>` reads live vendor status from fixtures and
   stores a local named scene in the top-level `scenes` object. With
   `--node <id-or-name>`, it captures only that fixture. `scene apply` restores saved

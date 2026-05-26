@@ -519,6 +519,56 @@ func nativeTelinkSourceAddress(
     )
 }
 
+func nativeTelinkSourceAddress(
+    runtime: [String: Any],
+    fixtures: [[String: Any]],
+    avoiding destinations: Set<Int>
+) throws -> Int {
+    let occupied = occupiedFixtureAddresses(fixtures)
+    let blocked = occupied.union(destinations)
+    let existing = jsonInt(runtime["telink_source_address"])
+    if let existing, !(1...0x7fff).contains(existing) {
+        throw BluetoothProbeError.invalidState("runtime telink_source_address must be a unicast address")
+    }
+    if let existing,
+       !blocked.contains(existing) {
+        return existing
+    }
+
+    if !blocked.contains(1) {
+        return 1
+    }
+    for candidate in 3...0x7fff {
+        if !blocked.contains(candidate) {
+            return candidate
+        }
+    }
+    if !blocked.contains(2) {
+        return 2
+    }
+    throw BluetoothProbeError.invalidState("could not choose an unused Telink source address")
+}
+
+func parseUnicastAddressList(_ spec: String) throws -> [Int] {
+    let parts = spec.split(separator: ",", omittingEmptySubsequences: true)
+    guard !parts.isEmpty else {
+        throw BluetoothProbeError.invalidState("status batch requires at least one address")
+    }
+    var seen = Set<Int>()
+    var addresses: [Int] = []
+    for part in parts {
+        guard let address = Int(part.trimmingCharacters(in: .whitespacesAndNewlines), radix: 10),
+              (1...0x7fff).contains(address) else {
+            throw BluetoothProbeError.invalidState("status batch contains an invalid unicast address")
+        }
+        if !seen.contains(address) {
+            seen.insert(address)
+            addresses.append(address)
+        }
+    }
+    return addresses
+}
+
 enum NativeSourceRole {
     case cliOwned
     case telinkRuntime
@@ -730,6 +780,108 @@ func reserveNativeStatusProxyPdu(
         metadata: NativeTelinkControlCommand.status.metadata(),
         lastReservedBy: "status-test",
         sourceRole: .telinkRuntime
+    )
+}
+
+func reserveNativeStatusProxyPdus(
+    statePath: String,
+    addresses: [Int]
+) throws -> NativePreparedProxyPduSequence {
+    guard !addresses.isEmpty else {
+        throw BluetoothProbeError.invalidState("status batch requires at least one address")
+    }
+    guard addresses.allSatisfy({ (1...0x7fff).contains($0) }) else {
+        throw BluetoothProbeError.invalidState("status batch contains a non-unicast address")
+    }
+
+    let url = URL(fileURLWithPath: statePath)
+    let data = try Data(contentsOf: url)
+    guard var payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        throw BluetoothProbeError.invalidState("state file must contain a JSON object")
+    }
+    guard jsonInt(payload["schema_version"]) == 1 else {
+        throw BluetoothProbeError.invalidState("unsupported state schema version")
+    }
+    guard let mesh = payload["mesh"] as? [String: Any] else {
+        throw BluetoothProbeError.invalidState("state file is missing mesh data")
+    }
+    guard let fixtures = payload["fixtures"] as? [[String: Any]], !fixtures.isEmpty else {
+        throw BluetoothProbeError.invalidState("state file is missing fixtures")
+    }
+    guard let netKeyHex = jsonString(mesh["net_key"]), let appKeyHex = jsonString(mesh["app_key"]) else {
+        throw BluetoothProbeError.invalidState("state mesh data missing keys")
+    }
+
+    var runtime = payload["runtime"] as? [String: Any] ?? [:]
+    let ivIndex = jsonInt(runtime["iv_index"]) ?? 0
+    let sourceAddress = try nativeTelinkSourceAddress(
+        runtime: runtime,
+        fixtures: fixtures,
+        avoiding: Set(addresses)
+    )
+    let sequenceNext = jsonInt(runtime["sequence_next"]) ?? 1
+    guard (0...0x00ff_fffe).contains(sequenceNext) else {
+        throw BluetoothProbeError.invalidState("runtime sequence_next is exhausted or invalid")
+    }
+    let nextSequence = sequenceNext + addresses.count
+    guard nextSequence <= 0x00ff_ffff else {
+        throw BluetoothProbeError.invalidState("runtime sequence_next does not have room for discover batch")
+    }
+
+    let netKey = try NativeMeshCrypto.bytes(hex: netKeyHex)
+    let appKey = try NativeMeshCrypto.bytes(hex: appKeyHex)
+    let networkKeys = try NativeMeshCrypto.k2(n: netKey, p: [0x00])
+    let appAid = try NativeMeshCrypto.k4(n: appKey)
+    let accessMessage = try NativeTelinkControlCommand.status.accessMessage()
+    let proxyPdus = try addresses.enumerated().map { offset, address in
+        try NativeMeshCrypto.applicationAccessProxyPdu(
+            ivIndex: UInt32(ivIndex),
+            ttl: 10,
+            sequence: UInt32(sequenceNext + offset),
+            source: UInt16(sourceAddress),
+            destination: UInt16(address),
+            netKey: netKey,
+            applicationKey: appKey,
+            accessMessage: accessMessage
+        ).network.proxyPdu
+    }
+
+    runtime["iv_index"] = ivIndex
+    runtime["telink_source_address"] = sourceAddress
+    runtime["sequence_next"] = nextSequence
+    runtime["updated_at"] = isoTimestamp()
+    runtime["last_reserved_by"] = "discover-status-batch"
+    payload["runtime"] = runtime
+
+    let updated = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+    try updated.write(to: url, options: .atomic)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: statePath)
+
+    let metadata: [String: Any] = [
+        "control_command": "status_batch",
+        "address_count": addresses.count,
+        "addresses": addresses,
+        "iv_index": ivIndex,
+        "sequence": sequenceNext,
+        "sequence_last": sequenceNext + addresses.count - 1,
+        "sequence_next": nextSequence,
+        "source": sourceAddress,
+        "ttl": 10,
+    ]
+
+    return NativePreparedProxyPduSequence(
+        proxyPdus: proxyPdus,
+        requiredProxyNetworkId: try NativeMeshCrypto.k3(n: netKey),
+        decodeMaterial: NativeDecodeMaterial(
+            networkKeys: networkKeys,
+            appKey: appKey,
+            appAid: appAid,
+            deviceKey: nil,
+            ivIndex: UInt32(ivIndex)
+        ),
+        metadata: metadata,
+        expectedSegmentAckSeqZero: nil,
+        expectedSegmentAckSegN: nil
     )
 }
 
@@ -1458,6 +1610,8 @@ final class ProbeOptions {
     var statePath = defaultStatePath()
     var settleAfterWrite: TimeInterval = 1.0
     var proxyWriteInterSegmentDelay: TimeInterval = 0.03
+    var proxyWritePauseEvery = 0
+    var proxyWritePauseDuration: TimeInterval = 0.0
     var expectedSegmentAckSeqZero: UInt16?
     var expectedSegmentAckSegN: UInt8?
     var segmentAckMaxSendAttempts = 4
@@ -1781,6 +1935,32 @@ final class ProbeOptions {
                     configurationError = String(describing: error)
                 }
                 index += 1
+            case "--status-batch":
+                if index + 1 < arguments.count {
+                    do {
+                        let addresses = try parseUnicastAddressList(arguments[index + 1])
+                        let prepared = try reserveNativeStatusProxyPdus(
+                            statePath: statePath,
+                            addresses: addresses
+                        )
+                        proxyPdus = prepared.proxyPdus
+                        proxyPduLabel = "telink-0x26-status-batch"
+                        requiredProxyNetworkId = prepared.requiredProxyNetworkId
+                        decodeMaterial = prepared.decodeMaterial
+                        nativeSendMetadata = prepared.metadata
+                        proxyWriteInterSegmentDelay = max(proxyWriteInterSegmentDelay, 0.05)
+                        proxyWritePauseEvery = 8
+                        proxyWritePauseDuration = 0.6
+                        settleAfterWrite = max(settleAfterWrite, 2.0)
+                        connect = true
+                    } catch {
+                        configurationError = String(describing: error)
+                    }
+                    index += 2
+                } else {
+                    configurationError = "--status-batch requires a comma-separated address list"
+                    index += 1
+                }
             case "--config-composition-get-test":
                 do {
                     let prepared = try reserveNativeConfigCompositionGetProxyPdu(
@@ -3809,7 +3989,14 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
             if proxyWriteIndex >= pdus.count {
                 completeProxyWriteOrWaitForAck()
             } else {
-                DispatchQueue.main.asyncAfter(deadline: .now() + options.proxyWriteInterSegmentDelay) { [weak self, weak peripheral] in
+                let delay: TimeInterval
+                if options.proxyWritePauseEvery > 0,
+                   proxyWriteIndex % options.proxyWritePauseEvery == 0 {
+                    delay = options.proxyWritePauseDuration
+                } else {
+                    delay = options.proxyWriteInterSegmentDelay
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak peripheral] in
                     guard let self, let peripheral else {
                         return
                     }

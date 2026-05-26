@@ -207,6 +207,53 @@ def status_for(root, state_path, timeout, address):
     return subprocess.run(command, text=True, capture_output=True)
 
 
+def status_batch_for(root, state_path, timeout, addresses):
+    app = Path(root) / "BluetoothProbe.app"
+    if not app.exists():
+        return None
+
+    fd, output = tempfile.mkstemp(prefix="amaran-discover-batch.", suffix=".json")
+    os.close(fd)
+    try:
+        try:
+            timeout_number = max(1.0, float(timeout))
+        except (TypeError, ValueError):
+            timeout_number = 20.0
+        settle = min(max(2.0, 1.5 + (len(addresses) * 0.02)), max(0.5, timeout_number - 2.0))
+        command = [
+            "/usr/bin/open",
+            "-n",
+            "-W",
+            str(app),
+            "--args",
+            "--output",
+            output,
+            "--timeout",
+            str(timeout),
+            "--state-path",
+            str(state_path),
+            "--status-batch",
+            ",".join(str(address) for address in addresses),
+            "--settle-after-write",
+            f"{settle:g}",
+        ]
+        result = subprocess.run(command, text=True, capture_output=True)
+        try:
+            with open(output, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (FileNotFoundError, json.JSONDecodeError):
+            detail = (result.stderr or result.stdout or "").strip().splitlines()[-1:] or ["status batch did not write a result"]
+            fail(detail[0])
+        if not payload.get("ok"):
+            fail(payload.get("error") or "status batch failed")
+        return payload.get("data") or {}
+    finally:
+        try:
+            os.unlink(output)
+        except OSError:
+            pass
+
+
 def normalize_status(address, fixture, raw_status):
     cct = raw_status.get("cct") or {}
     intensity = cct.get("intensity")
@@ -221,6 +268,7 @@ def normalize_status(address, fixture, raw_status):
         "mac_suffix": mac_suffix(fixture.get("mac_address")),
         "intensity": intensity,
         "cct": cct_kelvin,
+        "gm": cct.get("gm_decoded", cct.get("gm")),
         "sleep_mode": cct.get("sleep_mode"),
         "control_only": bool(fixture.get("control_only")),
     }
@@ -237,9 +285,62 @@ def status_detail(fixture):
         details.append(f"{fixture['intensity']:g}%")
     if fixture.get("cct") is not None:
         details.append(f"{fixture['cct']}K")
+    if fixture.get("gm") is not None:
+        details.append(f"gm={fixture['gm']}")
     if fixture.get("sleep_mode") is not None:
         details.append(f"sleep={fixture['sleep_mode']}")
     return ", ".join(details)
+
+
+def status_notifications_by_source(batch_data, addresses):
+    wanted = set(addresses)
+    statuses = {}
+    for notification in batch_data.get("proxy_notifications") or []:
+        if not isinstance(notification, dict):
+            continue
+        network = notification.get("network") or {}
+        source = network.get("source")
+        if source not in wanted:
+            continue
+        telink = ((notification.get("access") or {}).get("telink") or {})
+        cct = telink.get("cct")
+        if not isinstance(cct, dict):
+            continue
+        statuses[source] = {
+            "cct": cct,
+        }
+    return statuses
+
+
+def print_discover_output(args, found, misses, source_relocation):
+    output = {
+        "discovered": len(found),
+        "range": args.range,
+        "updated_state": bool(args.update_state),
+        "fixtures": found,
+        "misses": misses,
+    }
+    if source_relocation:
+        output["runtime_source_relocated"] = source_relocation
+    if args.json:
+        print(json.dumps(output, indent=2))
+        return
+
+    print(f"discovered {len(found)} fixtures in range {args.range}")
+    for fixture in found:
+        suffix = fixture.get("mac_suffix") or "unknown"
+        parts = [fixture["name"], str(fixture["address"]), f"...{suffix}"]
+        if fixture.get("intensity") is not None:
+            parts.append(f"{fixture['intensity']:g}%")
+        if fixture.get("cct") is not None:
+            parts.append(f"{fixture['cct']}K")
+        if fixture.get("gm") is not None:
+            parts.append(f"gm {fixture['gm']}")
+        print("\t".join(parts))
+    if source_relocation:
+        print(f"runtime source moved {source_relocation['from']}->{source_relocation['to']} to avoid scanned fixture addresses")
+    if not args.update_state:
+        print("state fixtures unchanged; sequence counters may be advanced")
 
 
 def install_interrupt_handler():
@@ -276,6 +377,44 @@ def main():
 
     found = []
     misses = []
+    batch_data = status_batch_for(args.root, state_path, args.timeout, addresses)
+    if batch_data is not None:
+        proxy_write = batch_data.get("proxy_write") or {}
+        progress(
+            args,
+            "discover batch sent "
+            f"{proxy_write.get('logical_pdu_count', len(addresses))} probes "
+            f"over one Mesh Proxy connection"
+        )
+        statuses = status_notifications_by_source(batch_data, addresses)
+        latest = load_state(state_path)
+        for index, address in enumerate(addresses, start=1):
+            step = f"[{index}/{total}]"
+            fixture = find_fixture(latest, address) or {
+                "node_address": address,
+                "name": f"fixture-{address}",
+                "control_only": True,
+            }
+            raw_status = statuses.get(address)
+            if raw_status:
+                status = normalize_status(address, fixture, raw_status)
+                found.append(status)
+                detail = status_detail(status)
+                detail_suffix = f": {detail}" if detail else ""
+                progress(args, f"{step} found address {address}: {status['name']}{detail_suffix}")
+            else:
+                misses.append({"address": address, "reason": "no-status"})
+                progress(args, f"{step} no response at address {address}")
+
+        if args.update_state and found:
+            latest = load_state(state_path)
+            for fixture in found:
+                ensure_fixture(latest, fixture["address"])
+            write_state(state_path, latest)
+
+        print_discover_output(args, found, misses, source_relocation)
+        return
+
     active_temporary_address = None
     try:
         for index, address in enumerate(addresses, start=1):
@@ -330,32 +469,7 @@ def main():
                 print(f"amaran: discover interrupted; failed to remove temporary fixture-{active_temporary_address}: {exc}", file=sys.stderr)
         raise
 
-    output = {
-        "discovered": len(found),
-        "range": args.range,
-        "updated_state": bool(args.update_state),
-        "fixtures": found,
-        "misses": misses,
-    }
-    if source_relocation:
-        output["runtime_source_relocated"] = source_relocation
-    if args.json:
-        print(json.dumps(output, indent=2))
-        return
-
-    print(f"discovered {len(found)} fixtures in range {args.range}")
-    for fixture in found:
-        suffix = fixture.get("mac_suffix") or "unknown"
-        parts = [fixture["name"], str(fixture["address"]), f"...{suffix}"]
-        if fixture.get("intensity") is not None:
-            parts.append(f"{fixture['intensity']:g}%")
-        if fixture.get("cct") is not None:
-            parts.append(f"{fixture['cct']}K")
-        print("\t".join(parts))
-    if source_relocation:
-        print(f"runtime source moved {source_relocation['from']}->{source_relocation['to']} to avoid scanned fixture addresses")
-    if not args.update_state:
-        print("state fixtures unchanged; sequence counters may be advanced")
+    print_discover_output(args, found, misses, source_relocation)
 
 
 if __name__ == "__main__":
