@@ -424,6 +424,8 @@ assert_contains "$DISCOVER_COLLISION_OUTPUT" "[1/1] found address 7" "discover p
 assert_contains "$DISCOVER_COLLISION_OUTPUT" "discovered 1 fixtures" "discover source collision summary"
 assert_contains "$DISCOVER_COLLISION_OUTPUT" "runtime source moved 7->" "discover source collision relocation"
 assert_contains "$DISCOVER_COLLISION_OUTPUT" "fixture-7" "discover source collision fixture"
+assert_contains "$DISCOVER_COLLISION_OUTPUT" "name       addr" "discover fixed-width table header"
+assert_not_contains "$DISCOVER_COLLISION_OUTPUT" "$TAB" "discover result table formatting"
 DISCOVER_JSON_STDOUT="$TMPDIR/discover-json.stdout"
 DISCOVER_JSON_STDERR="$TMPDIR/discover-json.stderr"
 "$ROOT/scripts/discover-existing-mesh" --root "$FAKE_DISCOVER_ROOT" --state-path "$DISCOVER_COLLISION_STATE" --range 7 --update-state --json >"$DISCOVER_JSON_STDOUT" 2>"$DISCOVER_JSON_STDERR"

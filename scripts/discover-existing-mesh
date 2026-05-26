@@ -312,6 +312,74 @@ def status_notifications_by_source(batch_data, addresses):
     return statuses
 
 
+def format_percent(value):
+    if value is None:
+        return "-"
+    if isinstance(value, (int, float)):
+        return f"{value:g}%"
+    return f"{value}%"
+
+
+def format_kelvin(value):
+    if value is None:
+        return "-"
+    return f"{value}K"
+
+
+def format_gm(value):
+    if value is None:
+        return "-"
+    return str(value)
+
+
+def print_fixture_table(fixtures):
+    if not fixtures:
+        return
+
+    rows = []
+    for fixture in fixtures:
+        suffix = fixture.get("mac_suffix") or "unknown"
+        rows.append({
+            "name": str(fixture["name"]),
+            "addr": str(fixture["address"]),
+            "mac": f"...{suffix}",
+            "intensity": format_percent(fixture.get("intensity")),
+            "cct": format_kelvin(fixture.get("cct")),
+            "gm": format_gm(fixture.get("gm")),
+        })
+
+    headers = {
+        "name": "name",
+        "addr": "addr",
+        "mac": "mac",
+        "intensity": "intensity",
+        "cct": "cct",
+        "gm": "gm",
+    }
+    columns = [
+        ("name", "<"),
+        ("addr", ">"),
+        ("mac", ">"),
+        ("intensity", ">"),
+        ("cct", ">"),
+        ("gm", ">"),
+    ]
+    widths = {
+        key: max(len(headers[key]), *(len(row[key]) for row in rows))
+        for key, _align in columns
+    }
+
+    print("  ".join(f"{headers[key]:<{widths[key]}}" for key, _align in columns))
+    for row in rows:
+        cells = []
+        for key, align in columns:
+            if align == ">":
+                cells.append(f"{row[key]:>{widths[key]}}")
+            else:
+                cells.append(f"{row[key]:<{widths[key]}}")
+        print("  ".join(cells))
+
+
 def print_discover_output(args, found, misses, source_relocation):
     output = {
         "discovered": len(found),
@@ -327,16 +395,7 @@ def print_discover_output(args, found, misses, source_relocation):
         return
 
     print(f"discovered {len(found)} fixtures in range {args.range}")
-    for fixture in found:
-        suffix = fixture.get("mac_suffix") or "unknown"
-        parts = [fixture["name"], str(fixture["address"]), f"...{suffix}"]
-        if fixture.get("intensity") is not None:
-            parts.append(f"{fixture['intensity']:g}%")
-        if fixture.get("cct") is not None:
-            parts.append(f"{fixture['cct']}K")
-        if fixture.get("gm") is not None:
-            parts.append(f"gm {fixture['gm']}")
-        print("\t".join(parts))
+    print_fixture_table(found)
     if source_relocation:
         print(f"runtime source moved {source_relocation['from']}->{source_relocation['to']} to avoid scanned fixture addresses")
     if not args.update_state:
