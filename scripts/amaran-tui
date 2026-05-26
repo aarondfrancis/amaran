@@ -875,7 +875,7 @@ class AmaranTui(App):
             table.add_row(
                 fixture.name,
                 str(address),
-                "[x]" if address in self.capture_include else "[ ]",
+                Text("[x]" if address in self.capture_include else "[ ]"),
                 self.render_status(fixture),
                 fixture.power,
                 self.render_percent(fixture.intensity),
