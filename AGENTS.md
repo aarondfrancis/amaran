@@ -206,6 +206,11 @@ Implementation notes:
   `--node`, it applies only matching fixture entries. `scene list` and
   `scene show` are offline reads. Scene commands must not print
   mesh/app/device keys.
+- Fixture capabilities are safe metadata and may be inferred from source model
+  names when local state does not contain explicit capabilities. Known
+  `400M5-*` fixtures are CCT-only, clamp to `2700-6500K`, and do not support
+  green-magenta correction. `list --json` may expose these non-secret
+  capabilities so the TUI can clamp sliders and hide unsupported controls.
 - `./bin/amaran join-capture --output-state <capture.json>` is experimental.
   It launches `BluetoothProbe.app` as a CoreBluetooth peripheral that advertises
   Mesh Provisioning service `0x1827` and behaves as a dummy no-OOB provisionee.

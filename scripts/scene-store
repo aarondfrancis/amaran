@@ -9,6 +9,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from amaran_capabilities import clamp_cct_for_fixture, fixture_capabilities
+
 
 def fail(message):
     print(f"amaran: {message}", file=sys.stderr)
@@ -93,15 +95,17 @@ def status_for(root, state_path, timeout, address):
     return subprocess.run(command, text=True, capture_output=True)
 
 
-def control(root, state_path, timeout, entry):
+def control(root, state_path, timeout, entry, fixture=None):
     address = str(entry["node_address"])
     base = [str(Path(root) / "bin" / "amaran")]
     target = ["--node", address, "--state-path", str(state_path), "--timeout", str(timeout)]
+    fixture_for_caps = fixture if isinstance(fixture, dict) else entry
+    capabilities = fixture_capabilities(fixture_for_caps)
     sleep_mode = entry.get("sleep_mode")
     if sleep_mode == 0:
         commands = [base + ["off"] + target]
     else:
-        cct = normalize_cct_kelvin(entry.get("cct"))
+        cct = clamp_cct_for_fixture(entry.get("cct"), fixture_for_caps)
         intensity = entry.get("intensity")
         if cct is not None and intensity is not None:
             command = base + [
@@ -111,7 +115,7 @@ def control(root, state_path, timeout, entry):
                 f"{float(intensity):g}",
             ] + target
             gm = entry.get("gm")
-            if gm is not None:
+            if gm is not None and capabilities["gm_supported"]:
                 command.extend(["--gm", str(int(gm))])
             commands = [base + ["on"] + target, command]
         elif intensity is not None:
@@ -143,13 +147,14 @@ def normalize_status(fixture, status):
         if isinstance(raw_intensity, (int, float)):
             intensity = raw_intensity / 10
     cct_kelvin = normalize_cct_kelvin(cct.get("cct_kelvin", cct.get("cct")))
+    gm = cct.get("gm") if fixture_capabilities(fixture)["gm_supported"] else None
     return {
         "node_address": fixture.get("node_address"),
         "name": fixture_label(fixture),
         "mac_suffix": mac_suffix(fixture.get("mac_address")),
         "intensity": intensity,
-        "cct": cct_kelvin,
-        "gm": cct.get("gm"),
+        "cct": clamp_cct_for_fixture(cct_kelvin, fixture),
+        "gm": gm,
         "sleep_mode": cct.get("sleep_mode"),
     }
 
@@ -300,13 +305,18 @@ def cmd_apply(args):
             for fixture in selected_fixtures(payload, args.node)
             if isinstance(fixture.get("node_address"), int)
         }
+    fixtures_by_address = {
+        fixture.get("node_address"): fixture
+        for fixture in payload.get("fixtures", [])
+        if isinstance(fixture, dict) and isinstance(fixture.get("node_address"), int)
+    }
     applied = []
     for entry in scene.get("fixtures") or []:
         if not isinstance(entry, dict) or not isinstance(entry.get("node_address"), int):
             continue
         if selected_addresses is not None and entry.get("node_address") not in selected_addresses:
             continue
-        result = control(args.root, state_path, args.timeout, entry)
+        result = control(args.root, state_path, args.timeout, entry, fixtures_by_address.get(entry.get("node_address")))
         applied.append({
             "address": entry.get("node_address"),
             "name": entry.get("name") or f"fixture-{entry.get('node_address')}",
@@ -342,21 +352,28 @@ def cmd_show(args):
     scene = scenes.get(args.name)
     if not isinstance(scene, dict):
         fail(f"scene not found: {args.name}")
+    fixtures_by_address = {
+        fixture.get("node_address"): fixture
+        for fixture in payload.get("fixtures", [])
+        if isinstance(fixture, dict) and isinstance(fixture.get("node_address"), int)
+    }
     output = scene_summary(args.name, scene)
     if args.json:
         print(json.dumps(output, indent=2))
         return
     print(f"{args.name}\t{output['fixture_count']}\t{output.get('captured_at') or 'unknown'}")
     for fixture in output["fixtures"]:
+        state_fixture = fixtures_by_address.get(fixture.get("node_address"))
+        fixture_for_caps = state_fixture if isinstance(state_fixture, dict) else fixture
         parts = [fixture.get("name") or f"fixture-{fixture.get('node_address')}", str(fixture.get("node_address"))]
         if fixture.get("sleep_mode") == 0:
             parts.append("off")
         if fixture.get("intensity") is not None:
             parts.append(f"{fixture['intensity']:g}%")
-        cct_kelvin = normalize_cct_kelvin(fixture.get("cct"))
+        cct_kelvin = clamp_cct_for_fixture(fixture.get("cct"), fixture_for_caps)
         if cct_kelvin is not None:
             parts.append(f"{cct_kelvin:g}K")
-        if fixture.get("gm") is not None:
+        if fixture.get("gm") is not None and fixture_capabilities(fixture_for_caps)["gm_supported"]:
             parts.append(f"gm {fixture['gm']}")
         print("\t".join(parts))
 

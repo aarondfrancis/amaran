@@ -126,6 +126,7 @@ class FixtureView:
     mac: Optional[str] = None
     friendly_name: Optional[str] = None
     source_name: Optional[str] = None
+    capabilities: Optional[Dict] = None
     status: str = "unknown"
     power: str = "unknown"
     intensity: Optional[float] = None
@@ -138,6 +139,23 @@ class FixtureView:
     @property
     def selector(self):
         return self.name or str(self.address)
+
+    def cct_min(self):
+        return self._capability_int("cct_min", 2000)
+
+    def cct_max(self):
+        return self._capability_int("cct_max", 10000)
+
+    def gm_supported(self):
+        capabilities = self.capabilities if isinstance(self.capabilities, dict) else {}
+        return capabilities.get("gm_supported", True) is not False
+
+    def _capability_int(self, key, default):
+        capabilities = self.capabilities if isinstance(self.capabilities, dict) else {}
+        value = capabilities.get(key)
+        if isinstance(value, (int, float)):
+            return int(value)
+        return default
 
 
 @dataclass
@@ -322,6 +340,8 @@ class ValueBar(Static):
         self.width = 30
         self.step = 1.0
         self.kind = ""
+        self.disabled = False
+        self.message = ""
 
     def set_value(self, label, value, minimum, maximum, suffix="", width=30, step=1, kind=""):
         self.label = label
@@ -332,10 +352,24 @@ class ValueBar(Static):
         self.width = int(width)
         self.step = float(step)
         self.kind = kind
+        self.disabled = False
+        self.message = ""
+        self.render_value()
+
+    def set_message(self, label, message, kind=""):
+        self.label = label
+        self.value = None
+        self.kind = kind
+        self.disabled = True
+        self.message = str(message)
         self.render_value()
 
     def render_value(self):
         text = Text()
+        if self.disabled:
+            text.append(f"{self.focus_marker()}{self.label:<10} {self.message}")
+            self.update(text)
+            return
         if self.value is None:
             text.append(self.value_prefix("unknown"))
             text.append("[")
@@ -416,6 +450,8 @@ class ValueBar(Static):
         return next_value
 
     def submit_value(self, value):
+        if self.disabled:
+            return
         self.value = value
         self.render_value()
         app = self.app
@@ -821,6 +857,7 @@ class AmaranTui(App):
                 name=str(row.get("name") or f"fixture-{address}"),
                 friendly_name=row.get("friendly_name"),
                 source_name=row.get("source_name"),
+                capabilities=row.get("capabilities") if isinstance(row.get("capabilities"), dict) else None,
                 address=address,
                 mac=row.get("mac"),
             )
@@ -880,7 +917,7 @@ class AmaranTui(App):
                 fixture.power,
                 self.render_percent(fixture.intensity),
                 f"{fixture.cct}K" if fixture.cct is not None else "?",
-                str(fixture.gm) if fixture.gm is not None else "?",
+                self.render_gm(fixture),
                 key=str(address),
             )
         if selected_address in self.fixtures and selected_address in self.fixture_order:
@@ -906,6 +943,12 @@ class AmaranTui(App):
         if isinstance(value, float) and not value.is_integer():
             return f"{value:.1f}%"
         return f"{int(value)}%"
+
+    @staticmethod
+    def render_gm(fixture):
+        if not fixture.gm_supported():
+            return "-"
+        return str(fixture.gm) if fixture.gm is not None else "?"
 
     def current_fixture(self):
         if self.selected_address in self.fixtures:
@@ -958,8 +1001,13 @@ class AmaranTui(App):
             detail += f"  error: {fixture.last_error}"
         title.update(detail)
         brightness.set_value("Brightness", fixture.intensity, 0, 100, "%", step=1, kind="brightness")
-        cct.set_value("Temp", fixture.cct, 2000, 10000, "K", step=100, kind="cct")
-        gm.set_value("G/M", fixture.gm, 0, 20, step=1, kind="gm")
+        cct_min = min(fixture.cct_min(), fixture.cct_max())
+        cct_max = max(fixture.cct_min(), fixture.cct_max())
+        cct.set_value("Temp", fixture.cct, cct_min, cct_max, "K", step=100, kind="cct")
+        if fixture.gm_supported():
+            gm.set_value("G/M", fixture.gm, 0, 20, step=1, kind="gm")
+        else:
+            gm.set_message("G/M", "unsupported", kind="gm")
 
     async def refresh_fixture(self, fixture):
         fixture.pending = True
@@ -984,9 +1032,13 @@ class AmaranTui(App):
                 intensity = float(cct["intensity"]) / 10.0
             fixture.intensity = float(intensity) if intensity is not None else None
             fixture.cct = int(cct["cct"]) if cct.get("cct") is not None else fixture.cct
-            fixture.gm = int(cct["gm"]) if cct.get("gm") is not None else fixture.gm
+            if fixture.gm_supported():
+                fixture.gm = int(cct["gm"]) if cct.get("gm") is not None else fixture.gm
+            else:
+                fixture.gm = None
             fixture.updated_at = datetime.now()
-            self.append_log(f"status {fixture.name}: {fixture.power}, {self.render_percent(fixture.intensity)}, {fixture.cct or '?'}K, gm {fixture.gm if fixture.gm is not None else '?'}")
+            gm_summary = f", gm {fixture.gm if fixture.gm is not None else '?'}" if fixture.gm_supported() else ""
+            self.append_log(f"status {fixture.name}: {fixture.power}, {self.render_percent(fixture.intensity)}, {fixture.cct or '?'}K{gm_summary}")
         except CommandError as exc:
             fixture.status = "error"
             fixture.power = "unknown"
@@ -1024,6 +1076,8 @@ class AmaranTui(App):
                 if "--gm" in args:
                     index = args.index("--gm")
                     fixture.gm = int(args[index + 1])
+                elif not fixture.gm_supported():
+                    fixture.gm = None
                 fixture.power = "on"
                 fixture.status = "online"
             elif command == "gm":
@@ -1047,19 +1101,16 @@ class AmaranTui(App):
         next_intensity = float(
             intensity if intensity is not None else fixture.intensity if fixture.intensity is not None else 50
         )
-        next_gm = int(gm if gm is not None else fixture.gm if fixture.gm is not None else 10)
-        next_cct = max(2000, min(10000, next_cct))
+        cct_min = min(fixture.cct_min(), fixture.cct_max())
+        cct_max = max(fixture.cct_min(), fixture.cct_max())
+        next_cct = max(cct_min, min(cct_max, next_cct))
         next_intensity = max(0, min(100, next_intensity))
-        next_gm = max(0, min(20, next_gm))
-        await self.control_fixture(
-            fixture,
-            "cct",
-            str(next_cct),
-            "--intensity",
-            f"{next_intensity:g}",
-            "--gm",
-            str(next_gm),
-        )
+        args = ["cct", str(next_cct), "--intensity", f"{next_intensity:g}"]
+        if fixture.gm_supported():
+            next_gm = int(gm if gm is not None else fixture.gm if fixture.gm is not None else 10)
+            next_gm = max(0, min(20, next_gm))
+            args.extend(["--gm", str(next_gm)])
+        await self.control_fixture(fixture, *args)
 
     def request_control_value(self, kind, value):
         fixture = self.current_fixture()
@@ -1068,8 +1119,14 @@ class AmaranTui(App):
         if kind == "brightness":
             fixture.intensity = max(0, min(100, float(value)))
         elif kind == "cct":
-            fixture.cct = max(2000, min(10000, int(value)))
+            cct_min = min(fixture.cct_min(), fixture.cct_max())
+            cct_max = max(fixture.cct_min(), fixture.cct_max())
+            fixture.cct = max(cct_min, min(cct_max, int(value)))
         elif kind == "gm":
+            if not fixture.gm_supported():
+                self.append_log(f"{fixture.name} does not support G/M")
+                self.update_selected_panel()
+                return
             fixture.gm = max(0, min(20, int(value)))
         else:
             return

@@ -353,6 +353,9 @@ assert_contains "$SIDUS_DOCTOR_OUTPUT" "fixtures 1" "sidus-import doctor fixture
 assert_contains "$SIDUS_DOCTOR_OUTPUT" "runtime ready" "sidus-import doctor readiness"
 SIDUS_LIST_OUTPUT="$("$ROOT/bin/amaran" list --state-path "$SIDUS_IMPORTED_STATE")"
 assert_contains "$SIDUS_LIST_OUTPUT" "400M5-123C21" "sidus-import list fixture"
+SIDUS_LIST_JSON_OUTPUT="$("$ROOT/bin/amaran" list --json --state-path "$SIDUS_IMPORTED_STATE")"
+assert_contains "$SIDUS_LIST_JSON_OUTPUT" '"cct_max": 6500' "sidus-import list capabilities"
+assert_contains "$SIDUS_LIST_JSON_OUTPUT" '"gm_supported": false' "sidus-import list gm capability"
 
 python3 - "$SIDUS_IMPORTED_STATE" <<'PY'
 import json
@@ -398,7 +401,7 @@ assert_contains "$SCENE_LIST_OUTPUT" "recording scene" "scene list"
 SCENE_SHOW_OUTPUT="$("$ROOT/bin/amaran" scene show "recording scene" --state-path "$SIDUS_IMPORTED_STATE")"
 assert_contains "$SCENE_SHOW_OUTPUT" "400M5-123C21" "scene show fixture"
 assert_contains "$SCENE_SHOW_OUTPUT" "5600K" "scene show cct"
-assert_contains "$SCENE_SHOW_OUTPUT" "gm 10" "scene show gm"
+assert_not_contains "$SCENE_SHOW_OUTPUT" "gm 10" "scene show unsupported gm"
 SCENE_SHOW_JSON_OUTPUT="$("$ROOT/bin/amaran" scene show "recording scene" --json --state-path "$SIDUS_IMPORTED_STATE")"
 assert_contains "$SCENE_SHOW_JSON_OUTPUT" '"fixture_count": 1' "scene show json"
 LEGACY_SCENE_SHOW_OUTPUT="$("$ROOT/bin/amaran" scene show "legacy scene" --state-path "$SIDUS_IMPORTED_STATE")"
@@ -528,6 +531,43 @@ for line in lines:
             break
 if cursor != len(expected):
     raise SystemExit(f"scene apply did not wake before restore commands: {lines}")
+PY
+python3 - "$SCENE_MULTI_STATE" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+payload.setdefault("scenes", {})["over temp"] = {
+    "captured_at": "2026-05-25T00:00:00Z",
+    "fixtures": [
+        {
+            "node_address": 9,
+            "name": "fill",
+            "mac_suffix": "000009",
+            "intensity": 12,
+            "cct": 9500,
+            "gm": 10,
+            "sleep_mode": 1,
+        }
+    ],
+}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh)
+    fh.write("\n")
+PY
+: > "$FAKE_SCENE_LOG"
+FAKE_SCENE_LOG="$FAKE_SCENE_LOG" "$ROOT/scripts/scene-store" --root "$FAKE_SCENE_ROOT" --state-path "$SCENE_MULTI_STATE" apply "over temp" >/dev/null
+python3 - "$FAKE_SCENE_LOG" <<'PY'
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    text = fh.read()
+if "cct 6500 --intensity 12 --node 9" not in text:
+    raise SystemExit(f"scene apply did not clamp 400M5 CCT: {text}")
+if "--gm" in text:
+    raise SystemExit(f"scene apply should omit G/M for 400M5 fixtures: {text}")
 PY
 
 DISCOVER_INVALID_OUTPUT="$TMPDIR/discover-invalid.out"

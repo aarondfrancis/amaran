@@ -128,9 +128,10 @@ Stable runtime commands:
   on/off     Send Telink vendor on/off.
   intensity  Send Telink brightness, 0-100 percent.
   cct        Send Telink CCT in Kelvin. Reads status to preserve any omitted
-             intensity or green-magenta value.
+             intensity or supported green-magenta value. Known fixture family
+             CCT limits are clamped before sending.
   gm         Send Telink green-magenta correction while preserving current CCT
-             and intensity.
+             and intensity. Fails for fixture families without G/M support.
 
 Runtime daemon:
   Runtime BLE commands auto-start a local BluetoothProbe.app daemon when one is
@@ -987,12 +988,14 @@ PY
 }
 
 run_local_state_list() {
-  /usr/bin/python3 - "$JSON" "$STATE_PATH" <<'PY'
+  /usr/bin/python3 - "$JSON" "$STATE_PATH" "$ROOT/scripts" <<'PY'
 import json
 import os
 import sys
 
-raw_json, state_path = sys.argv[1] == "1", os.path.expanduser(sys.argv[2])
+raw_json, state_path, scripts_dir = sys.argv[1] == "1", os.path.expanduser(sys.argv[2]), sys.argv[3]
+sys.path.insert(0, scripts_dir)
+from amaran_capabilities import fixture_capabilities
 
 try:
     with open(state_path, "r", encoding="utf-8") as fh:
@@ -1042,6 +1045,7 @@ safe = [
         "source_name": fixture.get("name") or None,
         "address": fixture.get("node_address"),
         "mac": mac_display(fixture.get("mac_address")),
+        "capabilities": fixture_capabilities(fixture),
     }
     for fixture in fixtures
     if isinstance(fixture, dict)
@@ -3489,10 +3493,37 @@ capture_native_status_json() {
   run_native_status_app status
 }
 
+selected_fixture_gm_supported() {
+  /usr/bin/python3 - "$STATE_PATH" "$NODE_ID" "$ROOT/scripts" <<'PY'
+import json
+import os
+import sys
+
+state_path, node_id, scripts_dir = sys.argv[1:4]
+sys.path.insert(0, scripts_dir)
+from amaran_capabilities import fixture_gm_supported, selected_fixture
+
+try:
+    with open(os.path.expanduser(state_path), "r", encoding="utf-8") as fh:
+        state = json.load(fh)
+except Exception:
+    print("1")
+    sys.exit(0)
+fixture = selected_fixture(state.get("fixtures") if isinstance(state.get("fixtures"), list) else [], node_id)
+print("1" if fixture_gm_supported(fixture) else "0")
+PY
+}
+
 build_native_cct_spec_from_status() {
   local kelvin="$1"
   local required_status=0
-  if [[ -z "$INTENSITY_OPT" || -z "$GM_OPT" ]]; then
+  local gm_supported="1"
+  gm_supported="$(selected_fixture_gm_supported 2>/dev/null || echo 1)"
+  if [[ -n "$GM_OPT" && "$gm_supported" == "0" ]]; then
+    echo "amaran: selected fixture does not support green-magenta correction" >&2
+    return 1
+  fi
+  if [[ -z "$INTENSITY_OPT" || ( -z "$GM_OPT" && "$gm_supported" != "0" ) ]]; then
     required_status=1
   fi
   local status_json
@@ -3511,12 +3542,15 @@ build_native_cct_spec_from_status() {
   local spec
   local parse_error
   parse_error="$(mktemp -t amaran-status-parse-error)"
-  if ! spec="$(STATUS_JSON="$status_json" /usr/bin/python3 - "$kelvin" "$INTENSITY_OPT" "$GM_OPT" 2>"$parse_error" <<'PY'
+  if ! spec="$(STATUS_JSON="$status_json" /usr/bin/python3 - "$kelvin" "$INTENSITY_OPT" "$GM_OPT" "$STATE_PATH" "$NODE_ID" "$ROOT/scripts" 2>"$parse_error" <<'PY'
 import json
 import os
 import sys
 
-kelvin, intensity_arg, gm_arg = sys.argv[1:4]
+kelvin_arg, intensity_arg, gm_arg, state_path, node_id, scripts_dir = sys.argv[1:7]
+sys.path.insert(0, scripts_dir)
+from amaran_capabilities import fixture_capabilities, fixture_label, selected_fixture
+
 try:
     payload = json.loads(os.environ["STATUS_JSON"])
 except (KeyError, json.JSONDecodeError):
@@ -3524,6 +3558,19 @@ except (KeyError, json.JSONDecodeError):
     sys.exit(1)
 
 cct = payload.get("cct") or {}
+
+def load_selected_fixture(path, selector):
+    try:
+        with open(os.path.expanduser(path), "r", encoding="utf-8") as fh:
+            state = json.load(fh)
+    except Exception as exc:
+        print(f"amaran: local state could not be read ({exc})", file=sys.stderr)
+        sys.exit(1)
+    fixtures = state.get("fixtures")
+    if not isinstance(fixtures, list):
+        print("amaran: local state is missing fixtures", file=sys.stderr)
+        sys.exit(1)
+    return selected_fixture(fixtures, selector)
 
 def parse_percent(value):
     try:
@@ -3547,6 +3594,24 @@ def parse_gm(value):
         sys.exit(1)
     return number
 
+try:
+    kelvin = int(float(kelvin_arg))
+except ValueError:
+    print("amaran: cct requires a kelvin value", file=sys.stderr)
+    sys.exit(1)
+
+fixture = load_selected_fixture(state_path, node_id)
+capabilities = fixture_capabilities(fixture)
+cct_min = capabilities["cct_min"]
+cct_max = capabilities["cct_max"]
+requested_kelvin = kelvin
+kelvin = max(cct_min, min(cct_max, kelvin))
+if kelvin != requested_kelvin:
+    print(
+        f"amaran: cct {requested_kelvin}K clamped to {kelvin}K for {fixture_label(fixture)}",
+        file=sys.stderr,
+    )
+
 if intensity_arg:
     intensity_percent = parse_percent(intensity_arg)
 else:
@@ -3557,7 +3622,13 @@ else:
     intensity_percent = float(intensity) / 10.0
 
 if gm_arg:
+    if not capabilities["gm_supported"]:
+        print(f"amaran: {fixture_label(fixture)} does not support green-magenta correction", file=sys.stderr)
+        sys.exit(1)
     gm = parse_gm(gm_arg)
+    gm_flag = 0
+elif not capabilities["gm_supported"]:
+    gm = 10
     gm_flag = 0
 else:
     gm = cct.get("gm", 10)
@@ -3590,16 +3661,37 @@ build_native_gm_spec_from_status() {
   local spec
   local parse_error
   parse_error="$(mktemp -t amaran-status-parse-error)"
-  if ! spec="$(STATUS_JSON="$status_json" /usr/bin/python3 - "$gm_value" 2>"$parse_error" <<'PY'
+  if ! spec="$(STATUS_JSON="$status_json" /usr/bin/python3 - "$gm_value" "$STATE_PATH" "$NODE_ID" "$ROOT/scripts" 2>"$parse_error" <<'PY'
 import json
 import os
 import sys
 
-gm_arg = sys.argv[1]
+gm_arg, state_path, node_id, scripts_dir = sys.argv[1:5]
+sys.path.insert(0, scripts_dir)
+from amaran_capabilities import fixture_capabilities, fixture_label, selected_fixture
+
 try:
     payload = json.loads(os.environ["STATUS_JSON"])
 except (KeyError, json.JSONDecodeError):
     print("amaran: status returned invalid JSON", file=sys.stderr)
+    sys.exit(1)
+
+def load_selected_fixture(path, selector):
+    try:
+        with open(os.path.expanduser(path), "r", encoding="utf-8") as fh:
+            state = json.load(fh)
+    except Exception as exc:
+        print(f"amaran: local state could not be read ({exc})", file=sys.stderr)
+        sys.exit(1)
+    fixtures = state.get("fixtures")
+    if not isinstance(fixtures, list):
+        print("amaran: local state is missing fixtures", file=sys.stderr)
+        sys.exit(1)
+    return selected_fixture(fixtures, selector)
+
+fixture = load_selected_fixture(state_path, node_id)
+if not fixture_capabilities(fixture)["gm_supported"]:
+    print(f"amaran: {fixture_label(fixture)} does not support green-magenta correction", file=sys.stderr)
     sys.exit(1)
 
 try:
@@ -3716,6 +3808,10 @@ run_control_command() {
   if [[ "$action" == "cct" ]]; then
     build_native_cct_spec_from_status "$1"
   elif [[ "$action" == "gm" ]]; then
+    if [[ "$(selected_fixture_gm_supported 2>/dev/null || echo 1)" == "0" ]]; then
+      echo "amaran: selected fixture does not support green-magenta correction" >&2
+      return 1
+    fi
     build_native_gm_spec_from_status "$1"
   else
     build_native_control_spec "$action" "$@"
@@ -4165,7 +4261,15 @@ case "$COMMAND" in
       run_control_command cct "$POSITIONALS[1]"
     fi
     if [[ "$JSON" != "1" ]]; then
-      cct_summary="cct $POSITIONALS[1]K"
+      actual_cct="${NATIVE_CONTROL_SPEC#cct:}"
+      actual_cct="${actual_cct%%:*}"
+      if [[ -z "$actual_cct" || "$actual_cct" == "$NATIVE_CONTROL_SPEC" ]]; then
+        actual_cct="$POSITIONALS[1]"
+      fi
+      cct_summary="cct ${actual_cct}K"
+      if [[ "$actual_cct" != "$POSITIONALS[1]" ]]; then
+        cct_summary="$cct_summary (clamped from $POSITIONALS[1]K)"
+      fi
       if [[ -n "$GM_OPT" ]]; then
         cct_summary="$cct_summary gm $GM_OPT"
       fi

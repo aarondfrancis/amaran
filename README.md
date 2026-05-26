@@ -188,11 +188,13 @@ Scenes live in the same local state file:
 ```
 
 `scene capture` reads live fixture status and stores intensity, CCT, green-
-magenta correction, and sleep state. Repeat `--node` to capture a selected set
-of fixtures. Use `--off-node <id-or-name>` to save a fixture as off without
-requiring a status response, which is useful when an intentionally off fixture
-would otherwise time out. `scene apply` wakes each saved-on fixture first, then
-sends the saved look; saved-off fixtures receive `off`. Both commands use the
+magenta correction when the fixture family supports it, and sleep state. Repeat
+`--node` to capture a selected set of fixtures. Use `--off-node <id-or-name>` to
+save a fixture as off without requiring a status response, which is useful when
+an intentionally off fixture would otherwise time out. `scene apply` wakes each
+saved-on fixture first, then sends the saved look; saved-off fixtures receive
+`off`. Scene restore is capability-aware, so known `400M5-*` fixtures are
+clamped to `2700-6500K` and do not receive G/M commands. Both commands use the
 mesh keys in local state, but command output remains redacted.
 
 ## Terminal UI
@@ -208,9 +210,11 @@ brightness, CCT, and green-magenta correction, identifies a selected fixture,
 and applies or captures scenes. Scene capture is explicit: mark fixtures in the
 `cap` column to include them. If an included fixture is currently shown as off,
 the TUI saves it with `--off-node`; otherwise it reads live status. Scene rows
-apply on activation. The TUI talks to the existing CLI commands and only
-consumes redacted JSON output; it does not read or display mesh, app, or device
-keys.
+apply on activation. The TUI uses the safe fixture capabilities exposed by
+`list --json`: for example, `400M5-*` fixtures show a `2700-6500K` CCT slider
+and mark G/M as unsupported instead of sending no-op G/M packets. The TUI talks
+to the existing CLI commands and only consumes redacted JSON output; it does not
+read or display mesh, app, or device keys.
 
 The first run installs Textual into a private venv under
 `~/Library/Application Support/amaran-cli/python/tui` if Textual is not already
@@ -366,8 +370,8 @@ one-shot helper path if the daemon cannot be reached.
 | `./bin/amaran on [--node <id-or-name>]` | Send Telink vendor on. |
 | `./bin/amaran off [--node <id-or-name>]` | Send Telink vendor off. |
 | `./bin/amaran intensity <0-100> [--node <id-or-name>]` | Send Telink brightness in percent. |
-| `./bin/amaran cct <kelvin> [--intensity <0-100>] [--gm <0-20>] [--node <id-or-name>]` | Send Telink CCT. The CLI reads status to preserve any omitted intensity or green-magenta value. |
-| `./bin/amaran gm <0-20> [--node <id-or-name>]` | Send Sidus-style green-magenta correction while preserving current CCT and intensity. `10` is neutral, lower is greener, higher is more magenta. |
+| `./bin/amaran cct <kelvin> [--intensity <0-100>] [--gm <0-20>] [--node <id-or-name>]` | Send Telink CCT. The CLI clamps known fixture-family CCT ranges and reads status only when needed to preserve omitted intensity or supported green-magenta state. |
+| `./bin/amaran gm <0-20> [--node <id-or-name>]` | Send Sidus-style green-magenta correction while preserving current CCT and intensity. `10` is neutral, lower is greener, higher is more magenta. Fails for fixture families without G/M support. |
 | `./bin/amaran daemon [start\|status\|stop] [--json]` | Start, inspect, or stop the local runtime daemon without sending fixture control commands. Runtime commands auto-start it when needed. |
 | `./bin/amaran ui` | Open the Textual terminal control surface for fixtures and scenes. |
 
