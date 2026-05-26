@@ -63,9 +63,9 @@ Useful commands:
 - `./bin/amaran fixture rename <node> <friendly-name> --json`
 - `./bin/amaran fixture clear-name <node>`
 - `./bin/amaran fixture clear-name <node> --json`
-- `./bin/amaran scene capture <name> [--node <id-or-name>]`
+- `./bin/amaran scene capture <name> [--node <id-or-name>]... [--off-node <id-or-name>]...`
 - `./bin/amaran scene capture <name> --json`
-- `./bin/amaran scene apply <name> [--node <id-or-name>]`
+- `./bin/amaran scene apply <name> [--node <id-or-name>]...`
 - `./bin/amaran scene apply <name> --json`
 - `./bin/amaran scene list`
 - `./bin/amaran scene list --json`
@@ -175,11 +175,14 @@ Implementation notes:
   may keep its old sequential path only as a fallback for tests or environments
   without the app bundle.
 - `./bin/amaran scene capture <name>` reads live vendor status from fixtures and
-  stores a local named scene in the top-level `scenes` object. With
-  `--node <id-or-name>`, it captures only that fixture. `scene apply` restores saved
-  intensity/CCT/sleep state through direct runtime commands; with `--node`, it
-  applies only that fixture's saved entry. `scene list` and `scene show` are
-  offline reads. Scene commands must not print mesh/app/device keys.
+  stores a local named scene in the top-level `scenes` object. Repeated
+  `--node <id-or-name>` captures a selected fixture set. Repeated
+  `--off-node <id-or-name>` records selected fixtures as off without sending a
+  status read, which avoids failures from intentionally off/asleep fixtures.
+  `scene apply` restores saved intensity/CCT/green-magenta/sleep state through
+  direct runtime commands; with `--node`, it applies only matching fixture
+  entries. `scene list` and `scene show` are offline reads. Scene commands must
+  not print mesh/app/device keys.
 - `./bin/amaran join-capture --output-state <capture.json>` is experimental.
   It launches `BluetoothProbe.app` as a CoreBluetooth peripheral that advertises
   Mesh Provisioning service `0x1827` and behaves as a dummy no-OOB provisionee.

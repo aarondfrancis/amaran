@@ -380,6 +380,86 @@ assert_contains "$SCENE_SHOW_JSON_OUTPUT" '"fixture_count": 1' "scene show json"
 LEGACY_SCENE_SHOW_OUTPUT="$("$ROOT/bin/amaran" scene show "legacy scene" --state-path "$SIDUS_IMPORTED_STATE")"
 assert_contains "$LEGACY_SCENE_SHOW_OUTPUT" "5600K" "scene show legacy raw CCT normalization"
 
+SCENE_MULTI_STATE="$TMPDIR/scene-multi-state.json"
+python3 - "$SIDUS_IMPORTED_STATE" "$SCENE_MULTI_STATE" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1], sys.argv[2]
+with open(source, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+payload["fixtures"] = [fixture for fixture in payload["fixtures"] if fixture.get("node_address") not in (9, 11)]
+payload["fixtures"].append({
+    "uuid": "fixture-9",
+    "mac_address": "A4:C1:38:00:00:09",
+    "code": "400M5",
+    "name": "fill",
+    "node_address": 9,
+    "element_count": 1,
+})
+payload["fixtures"].append({
+    "uuid": "fixture-11",
+    "mac_address": "A4:C1:38:00:00:11",
+    "code": "400M5",
+    "name": "backlight",
+    "node_address": 11,
+    "element_count": 1,
+})
+with open(target, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh)
+    fh.write("\n")
+PY
+FAKE_SCENE_ROOT="$TMPDIR/fake-scene-root"
+mkdir -p "$FAKE_SCENE_ROOT/bin"
+cat > "$FAKE_SCENE_ROOT/bin/amaran" <<'SH'
+#!/bin/sh
+node=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--node" ]; then
+    node="$2"
+    shift 2
+  else
+    shift
+  fi
+done
+case "$node" in
+  7)
+    cat <<'JSON'
+{"address":7,"cct":{"sleep_mode":1,"cct":560,"intensity":180,"gm":10}}
+JSON
+    ;;
+  9)
+    cat <<'JSON'
+{"address":9,"cct":{"sleep_mode":1,"cct":400,"intensity":500,"gm":12}}
+JSON
+    ;;
+  *)
+    echo "unexpected node $node" >&2
+    exit 1
+    ;;
+esac
+SH
+chmod +x "$FAKE_SCENE_ROOT/bin/amaran"
+SCENE_MULTI_OUTPUT="$("$ROOT/scripts/scene-store" --root "$FAKE_SCENE_ROOT" --state-path "$SCENE_MULTI_STATE" --node 7 --node 9 --off-node 11 capture "multi scene")"
+assert_contains "$SCENE_MULTI_OUTPUT" "captured scene 'multi scene' with 3 fixtures" "scene capture selected and forced-off count"
+SCENE_MULTI_SHOW="$("$ROOT/scripts/scene-store" --root "$FAKE_SCENE_ROOT" --state-path "$SCENE_MULTI_STATE" show "multi scene")"
+assert_contains "$SCENE_MULTI_SHOW" "400M5-123C21" "scene capture selected first fixture"
+assert_contains "$SCENE_MULTI_SHOW" "fill" "scene capture selected second fixture"
+assert_contains "$SCENE_MULTI_SHOW" "backlight" "scene capture forced-off fixture"
+assert_contains "$SCENE_MULTI_SHOW" "off" "scene show forced-off fixture"
+python3 - "$SCENE_MULTI_STATE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+fixtures = payload["scenes"]["multi scene"]["fixtures"]
+if [fixture["node_address"] for fixture in fixtures] != [7, 9, 11]:
+    raise SystemExit("scene fixture selection order was not preserved")
+if fixtures[2].get("sleep_mode") != 0:
+    raise SystemExit("forced-off scene fixture did not store sleep_mode 0")
+PY
+
 DISCOVER_INVALID_OUTPUT="$TMPDIR/discover-invalid.out"
 if "$ROOT/bin/amaran" discover --range bad --state-path "$SIDUS_IMPORTED_STATE" >"$DISCOVER_INVALID_OUTPUT" 2>&1; then
   fail "discover should reject invalid ranges before BLE"

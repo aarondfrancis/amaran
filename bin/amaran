@@ -25,6 +25,8 @@ MESH_SELECTOR=""
 REPLACE_STATE=0
 DISCOVER_RANGE=""
 DISCOVER_UPDATE_STATE=0
+SCENE_NODES=()
+SCENE_OFF_NODES=()
 
 usage() {
   cat <<'EOF'
@@ -41,7 +43,7 @@ Usage:
   amaran discover --range <start-end[,addr]> [--update-state] [--json]
   amaran fixture rename <node> <friendly-name> [--json]
   amaran fixture clear-name <node> [--json]
-  amaran scene capture <name> [--node <id|name>] [--json]
+  amaran scene capture <name> [--node <id|name>]... [--off-node <id|name>]... [--json]
   amaran scene apply <name> [--node <id|name>] [--json]
   amaran scene list [--json]
   amaran scene show <name> [--json]
@@ -77,6 +79,11 @@ Diagnostics:
 Options:
   --node <id|name>   Fixture node address or friendly name. Defaults to
                      AMARAN_NODE_ID, then the only fixture in local state.
+                     For scene capture/apply, repeat --node to select more
+                     than one fixture.
+  --off-node <id|name>
+                     For scene capture, save this fixture as off without
+                     reading live status. Repeat to mark multiple fixtures off.
   --timeout <sec>    BLE helper timeout. Defaults to AMARAN_TIMEOUT or 20.
   --attention <sec>  Provisioning Invite attention duration, 0-255 seconds.
                      Defaults to AMARAN_ATTENTION_DURATION or 0.
@@ -145,7 +152,9 @@ State and pairing:
   fixture        Rename or clear local fixture-friendly names. Names are stored
                  in CLI state and do not change Sidus Link Pro metadata.
   scene          Capture, list, show, and apply named fixture states. Capturing
-                 reads live status; applying sends direct runtime commands.
+                 reads live status for selected --node fixtures; --off-node
+                 records a fixture as off without requiring a status response.
+                 Applying sends direct runtime commands.
   daemon         Start, inspect, or stop the local runtime daemon.
   monitor        Subscribe to Mesh Proxy notifications for reverse-engineering
                  runtime packets. Output is redacted and key-free.
@@ -271,6 +280,12 @@ while [[ $# -gt 0 ]]; do
     --node)
       [[ $# -ge 2 ]] || { echo "amaran: --node requires a value" >&2; exit 1; }
       NODE_ID="$2"
+      SCENE_NODES+=("$2")
+      shift 2
+      ;;
+    --off-node)
+      [[ $# -ge 2 ]] || { echo "amaran: --off-node requires a value" >&2; exit 1; }
+      SCENE_OFF_NODES+=("$2")
       shift 2
       ;;
     --timeout)
@@ -423,6 +438,11 @@ if [[ "$VERIFY" == "1" ]]; then
     echo "amaran: --verify cannot be used with --dry-run" >&2
     exit 1
   fi
+fi
+
+if [[ ${#SCENE_OFF_NODES[@]} -gt 0 && "$COMMAND" != "scene" ]]; then
+  echo "amaran: --off-node is only supported for scene capture" >&2
+  exit 1
 fi
 
 if [[ "$ADD_FIXTURE" == "1" ]]; then
@@ -1695,8 +1715,23 @@ run_scene_command() {
   esac
 
   local args=("$ROOT/scripts/scene-store" --root "$ROOT" --state-path "$STATE_PATH" --timeout "$TIMEOUT")
-  if [[ -n "$NODE_ID" ]]; then
+  if [[ ${#SCENE_NODES[@]} -gt 0 ]]; then
+    local scene_node
+    for scene_node in "${SCENE_NODES[@]}"; do
+      args+=(--node "$scene_node")
+    done
+  elif [[ -n "$NODE_ID" ]]; then
     args+=(--node "$NODE_ID")
+  fi
+  if [[ ${#SCENE_OFF_NODES[@]} -gt 0 ]]; then
+    if [[ "$action" != "capture" ]]; then
+      echo "amaran: --off-node is only supported for scene capture" >&2
+      return 1
+    fi
+    local scene_off_node
+    for scene_off_node in "${SCENE_OFF_NODES[@]}"; do
+      args+=(--off-node "$scene_off_node")
+    done
   fi
   if [[ "$JSON" == "1" ]]; then
     args+=(--json)

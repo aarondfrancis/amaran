@@ -172,15 +172,20 @@ Scenes live in the same local state file:
 ```sh
 ./bin/amaran scene capture "recording scene"
 ./bin/amaran scene capture "recording scene" --node <address-from-list>
+./bin/amaran scene capture "recording scene" --node key --node fill --off-node backlight
 ./bin/amaran scene list
 ./bin/amaran scene show "recording scene"
 ./bin/amaran scene apply "recording scene"
 ./bin/amaran scene apply "recording scene" --node <address-from-list>
 ```
 
-`scene capture` reads live fixture status and stores intensity, CCT, and sleep
-state. `scene apply` sends direct runtime commands back to each fixture. Both
-commands use the mesh keys in local state, but command output remains redacted.
+`scene capture` reads live fixture status and stores intensity, CCT, green-
+magenta correction, and sleep state. Repeat `--node` to capture a selected set
+of fixtures. Use `--off-node <id-or-name>` to save a fixture as off without
+requiring a status response, which is useful when an intentionally off fixture
+would otherwise time out. `scene apply` sends direct runtime commands back to
+each saved fixture. Both commands use the mesh keys in local state, but command
+output remains redacted.
 
 ## Joining An Existing Mesh
 
@@ -322,8 +327,8 @@ State and pairing commands manage local state and fixture setup.
 | `./bin/amaran discover --range <spec> [--update-state] [--json]` | Probe candidate unicast addresses on the current mesh and optionally keep responsive control-only fixture entries. |
 | `./bin/amaran fixture rename <node> <friendly-name> [--json]` | Store a CLI-only friendly name for a fixture. Names are safe to print and do not change Sidus metadata. |
 | `./bin/amaran fixture clear-name <node> [--json]` | Remove a CLI-only friendly name and fall back to the imported source name. |
-| `./bin/amaran scene capture <name> [--node <id-or-name>] [--json]` | Read live status from fixtures and save a named scene in local state. With `--node`, capture only that fixture. |
-| `./bin/amaran scene apply <name> [--node <id-or-name>] [--json]` | Apply a saved scene through direct runtime commands. With `--node`, apply only that fixture's entry. |
+| `./bin/amaran scene capture <name> [--node <id-or-name>]... [--off-node <id-or-name>]... [--json]` | Read live status from fixtures and save a named scene in local state. Repeat `--node` for a selected fixture set; use `--off-node` to record a fixture as off without reading status. |
+| `./bin/amaran scene apply <name> [--node <id-or-name>]... [--json]` | Apply a saved scene through direct runtime commands. With `--node`, apply only matching fixture entries. |
 | `./bin/amaran scene list [--json]` | List saved scenes without launching BLE. |
 | `./bin/amaran scene show <name> [--json]` | Show one saved scene without launching BLE. |
 
