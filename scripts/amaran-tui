@@ -1450,7 +1450,12 @@ class AmaranTui(App):
         if not scene:
             self.append_log("no scene selected")
             return
-        confirmed = await self.push_screen_wait(DeleteSceneModal(scene))
+        self.push_screen(
+            DeleteSceneModal(scene),
+            lambda confirmed, scene=scene: self.schedule(self.finish_delete_scene(scene, confirmed)),
+        )
+
+    async def finish_delete_scene(self, scene, confirmed):
         if not confirmed:
             self.append_log(f"kept scene {scene}")
             return
