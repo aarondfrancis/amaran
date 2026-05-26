@@ -107,7 +107,12 @@ Implementation notes:
   mesh/app/device keys directly. It may auto-install Textual into a private
   venv under `~/Library/Application Support/amaran-cli/python/tui`; set
   `AMARAN_TUI_VENV` to override that path or `AMARAN_TUI_BOOTSTRAP=0` to
-  disable automatic dependency setup.
+  disable automatic dependency setup. Refresh-all uses
+  `AMARAN_TUI_STATUS_TIMEOUT`, defaulting to the lower of `AMARAN_TIMEOUT` and
+  5 seconds, so stale fixtures do not make the interface feel stuck. Theme
+  defaults to auto detection: OSC 11 terminal background query first, then
+  macOS appearance fallback. `AMARAN_TUI_THEME` or `--theme <auto|dark|light>`
+  can override it.
 - `./bin/amaran fixture rename <node> <friendly-name>` stores a CLI-only
   `friendly_name` on the selected fixture. Runtime commands, diagnostics, and
   scene commands should accept that friendly name anywhere `--node` is accepted.

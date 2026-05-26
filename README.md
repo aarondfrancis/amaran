@@ -85,8 +85,10 @@ Environment variables are only convenience defaults such as `AMARAN_NODE_ID`,
 the older one-shot helper path, and `AMARAN_DAEMON_PORT_FILE` overrides the
 non-secret daemon port metadata path. `AMARAN_TUI_VENV` can override the
 private Textual venv path for `ui`; set `AMARAN_TUI_BOOTSTRAP=0` to prevent
-automatic dependency installation. The key-bearing file is the local state
-manifest, normally
+automatic dependency installation. `AMARAN_TUI_STATUS_TIMEOUT` controls the
+per-fixture status timeout inside the TUI and defaults to the lower of
+`AMARAN_TIMEOUT` and `5`. `AMARAN_TUI_THEME` can be `auto`, `dark`, or `light`.
+The key-bearing file is the local state manifest, normally
 `~/Library/Application Support/amaran-cli/state.json`.
 
 Commands reserve sequence numbers in that state. DeviceKey Config sends
@@ -206,8 +208,14 @@ keys.
 
 The first run installs Textual into a private venv under
 `~/Library/Application Support/amaran-cli/python/tui` if Textual is not already
-available to `python3`. Use `AMARAN_TUI_VENV=/path/to/venv` to choose another
-venv, or `AMARAN_TUI_BOOTSTRAP=0` if you want dependency setup to fail fast.
+available to `python3`. It detects the terminal background color with an OSC 11
+query and falls back to macOS appearance when the terminal does not answer.
+Use `./bin/amaran ui --theme dark` or `--theme light` to override detection.
+Use `AMARAN_TUI_VENV=/path/to/venv` to choose another venv, or
+`AMARAN_TUI_BOOTSTRAP=0` if you want dependency setup to fail fast.
+Refresh-all uses a short per-fixture status timeout so stale fixtures are
+marked as errors quickly instead of making the interface feel stuck; override
+it with `AMARAN_TUI_STATUS_TIMEOUT=<seconds>`.
 
 Useful keys:
 

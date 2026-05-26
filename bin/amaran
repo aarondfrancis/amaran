@@ -25,6 +25,8 @@ MESH_SELECTOR=""
 REPLACE_STATE=0
 DISCOVER_RANGE=""
 DISCOVER_UPDATE_STATE=0
+TUI_THEME="${AMARAN_TUI_THEME:-auto}"
+TUI_THEME_SET=0
 SCENE_NODES=()
 SCENE_OFF_NODES=()
 
@@ -102,6 +104,9 @@ Options:
   --range <spec>     Address range for discover, such as 2-32 or 2-8,12.
   --update-state     For discover, keep newly responsive fixture entries in
                      local state. Without it, only sequence counters persist.
+  --theme <auto|dark|light>
+                     For ui, choose terminal theme mode. Defaults to auto,
+                     then AMARAN_TUI_THEME, then terminal/macOS detection.
   --gm <0-20>        Green-magenta correction for CCT-capable fixtures. 10 is
                      neutral; lower is greener and higher is more magenta.
   --dry-run          For pair, preflight + scan only. For node reset, validate
@@ -198,6 +203,9 @@ Environment:
   AMARAN_TUI_VENV              Optional venv path for Textual, used by ui.
   AMARAN_TUI_BOOTSTRAP         Set to 0 to prevent ui from installing Textual
                                into the private venv when it is missing.
+  AMARAN_TUI_STATUS_TIMEOUT    Per-fixture status timeout for ui refreshes.
+                               Defaults to the lower of AMARAN_TIMEOUT and 5.
+  AMARAN_TUI_THEME             Default ui theme: auto, dark, or light.
   The CLI does not load .env files. Do not store mesh, app, or device keys in
   environment variables; they belong only in the 0600 local state manifest.
 
@@ -368,6 +376,12 @@ while [[ $# -gt 0 ]]; do
       DISCOVER_UPDATE_STATE=1
       shift
       ;;
+    --theme)
+      [[ $# -ge 2 ]] || { echo "amaran: --theme requires auto, dark, or light" >&2; exit 1; }
+      TUI_THEME="$2"
+      TUI_THEME_SET=1
+      shift 2
+      ;;
     --intensity)
       [[ $# -ge 2 ]] || { echo "amaran: --intensity requires a value" >&2; exit 1; }
       INTENSITY_OPT="$2"
@@ -505,6 +519,16 @@ fi
 
 if [[ "$DISCOVER_UPDATE_STATE" == "1" && "$COMMAND" != "discover" ]]; then
   echo "amaran: --update-state is only supported for discover" >&2
+  exit 1
+fi
+
+if [[ "$TUI_THEME_SET" == "1" && "$COMMAND" != "ui" ]]; then
+  echo "amaran: --theme is only supported for ui" >&2
+  exit 1
+fi
+
+if [[ "$COMMAND" == "ui" && "$TUI_THEME" != "auto" && "$TUI_THEME" != "dark" && "$TUI_THEME" != "light" ]]; then
+  echo "amaran: --theme requires auto, dark, or light" >&2
   exit 1
 fi
 
@@ -3917,7 +3941,7 @@ PY
 }
 
 run_tui_command() {
-  "$ROOT/scripts/amaran-tui" --root "$ROOT" --state-path "$STATE_PATH" --timeout "$TIMEOUT"
+  "$ROOT/scripts/amaran-tui" --root "$ROOT" --state-path "$STATE_PATH" --timeout "$TIMEOUT" --theme "$TUI_THEME"
 }
 
 run_monitor_command() {

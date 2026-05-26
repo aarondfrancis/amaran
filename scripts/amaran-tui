@@ -4,8 +4,13 @@ import asyncio
 import importlib.util
 import json
 import os
+import re
+import select
 import subprocess
 import sys
+import termios
+import time
+import tty
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -90,6 +95,7 @@ def build_parser():
     parser.add_argument("--root", required=True)
     parser.add_argument("--state-path", required=True)
     parser.add_argument("--timeout", default="20")
+    parser.add_argument("--theme", choices=("auto", "dark", "light"), default="auto")
     return parser
 
 
@@ -160,6 +166,85 @@ class ValueBar(Static):
         else:
             rendered = f"{int(value)}{suffix}"
         self.update(f"{label:<10} [{bar}] {rendered}")
+
+
+def parse_terminal_background(response):
+    match = re.search(r"\x1b]11;([^\x07\x1b]+)(?:\x07|\x1b\\)", response)
+    if not match:
+        return None
+    color = match.group(1).strip()
+    if color.startswith("rgb:"):
+        parts = color[4:].split("/")
+    elif color.startswith("rgba:"):
+        parts = color[5:].split("/")[:3]
+    else:
+        return None
+    if len(parts) != 3:
+        return None
+    values = []
+    for part in parts:
+        if not part or not all(ch in "0123456789abcdefABCDEF" for ch in part):
+            return None
+        maximum = (16 ** len(part)) - 1
+        if maximum <= 0:
+            return None
+        values.append(int(part, 16) / maximum)
+    red, green, blue = values
+    luminance = (0.2126 * red) + (0.7152 * green) + (0.0722 * blue)
+    return "light" if luminance >= 0.5 else "dark"
+
+
+def query_terminal_theme():
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return None
+    fd = sys.stdin.fileno()
+    try:
+        original = termios.tcgetattr(fd)
+    except termios.error:
+        return None
+    response = ""
+    try:
+        tty.setcbreak(fd)
+        sys.stdout.write("\033]11;?\033\\")
+        sys.stdout.flush()
+        deadline = time.monotonic() + 0.20
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([fd], [], [], max(0.0, deadline - time.monotonic()))
+            if not readable:
+                break
+            chunk = os.read(fd, 128).decode("utf-8", errors="ignore")
+            response += chunk
+            if "\a" in response or "\033\\" in response:
+                break
+    except OSError:
+        return None
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, original)
+        except termios.error:
+            pass
+    return parse_terminal_background(response)
+
+
+def macos_appearance_theme():
+    try:
+        result = subprocess.run(
+            ["defaults", "read", "-g", "AppleInterfaceStyle"],
+            text=True,
+            capture_output=True,
+            timeout=0.25,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode == 0 and result.stdout.strip().lower() == "dark":
+        return "dark"
+    return "light"
+
+
+def resolve_theme(requested):
+    if requested in ("dark", "light"):
+        return requested
+    return query_terminal_theme() or macos_appearance_theme() or "dark"
 
 
 class AmaranTui(App):
@@ -243,16 +328,20 @@ class AmaranTui(App):
         ("?", "show_help", "Help"),
     ]
 
-    def __init__(self, root, state_path, timeout):
+    def __init__(self, root, state_path, timeout, theme_mode):
         super().__init__()
+        self.theme = "textual-light" if theme_mode == "light" else "textual-dark"
+        self.theme_mode = theme_mode
         self.root = Path(root).expanduser().resolve()
         self.state_path = str(Path(state_path).expanduser())
         self.timeout = str(timeout)
         self.command_timeout = self._command_timeout(timeout)
+        self.status_timeout = self._status_timeout()
         self.fixtures: Dict[int, FixtureView] = {}
         self.fixture_order: List[int] = []
         self.scenes: List[SceneView] = []
         self.scene_order: List[str] = []
+        self.refresh_all_task = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -311,18 +400,25 @@ class AmaranTui(App):
         except ValueError:
             return 20.0
 
+    def _status_timeout(self):
+        configured = os.environ.get("AMARAN_TUI_STATUS_TIMEOUT")
+        if configured:
+            return self._command_timeout(configured)
+        return min(self.command_timeout, 5.0)
+
     def append_log(self, message):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.query_one("#log", Log).write_line(f"{timestamp} {message}")
 
-    async def run_amaran(self, *args, expect_json=False, extra_timeout=5.0):
+    async def run_amaran(self, *args, expect_json=False, extra_timeout=5.0, cli_timeout=None, wait_timeout=None):
+        timeout_value = str(cli_timeout if cli_timeout is not None else self.timeout)
         command = [
             str(self.root / "bin" / "amaran"),
             *[str(arg) for arg in args],
             "--state-path",
             self.state_path,
             "--timeout",
-            self.timeout,
+            timeout_value,
         ]
         process = await asyncio.create_subprocess_exec(
             *command,
@@ -331,14 +427,15 @@ class AmaranTui(App):
             cwd=str(self.root),
         )
         try:
+            limit = wait_timeout if wait_timeout is not None else self._command_timeout(timeout_value) + extra_timeout
             stdout_b, stderr_b = await asyncio.wait_for(
                 process.communicate(),
-                timeout=self.command_timeout + extra_timeout,
+                timeout=limit,
             )
         except asyncio.TimeoutError:
             process.kill()
             await process.communicate()
-            raise CommandError(command, f"command timed out after {self.command_timeout + extra_timeout:g}s")
+            raise CommandError(command, f"command timed out after {limit:g}s")
 
         stdout = stdout_b.decode("utf-8", errors="replace")
         stderr = stderr_b.decode("utf-8", errors="replace")
@@ -360,10 +457,12 @@ class AmaranTui(App):
             state = data.get("central_state", "unknown")
             connected = "yes" if data.get("connected") else "no"
             self.query_one("#status-line", Static).update(
-                f"daemon: running pid {daemon.get('pid', '?')}    bluetooth: {state}    connected: {connected}"
+                f"daemon: running pid {daemon.get('pid', '?')}    bluetooth: {state}    connected: {connected}    theme: {self.theme_mode}"
             )
         except CommandError as exc:
-            self.query_one("#status-line", Static).update(f"daemon: unavailable    {exc.message}")
+            self.query_one("#status-line", Static).update(
+                f"daemon: unavailable    theme: {self.theme_mode}    {exc.message}"
+            )
 
     async def load_fixtures(self):
         try:
@@ -509,7 +608,15 @@ class AmaranTui(App):
         self.render_fixtures()
         self.update_selected_panel()
         try:
-            payload = await self.run_amaran("status", "--json", "--node", fixture.selector, expect_json=True)
+            payload = await self.run_amaran(
+                "status",
+                "--json",
+                "--node",
+                fixture.selector,
+                expect_json=True,
+                cli_timeout=f"{self.status_timeout:g}",
+                wait_timeout=self.status_timeout + 2,
+            )
             cct = payload.get("cct") or {}
             fixture.status = "online"
             fixture.power = "off" if cct.get("sleep_mode") == 0 else "on"
@@ -601,12 +708,25 @@ class AmaranTui(App):
         if fixture:
             await self.refresh_fixture(fixture)
 
-    async def action_refresh_all(self):
-        self.append_log("refreshing all fixtures")
-        for address in list(self.fixture_order):
-            fixture = self.fixtures.get(address)
-            if fixture:
-                await self.refresh_fixture(fixture)
+    def action_refresh_all(self):
+        if self.refresh_all_task and not self.refresh_all_task.done():
+            self.append_log("refresh all already running")
+            return
+        self.refresh_all_task = asyncio.create_task(self.refresh_all())
+
+    async def refresh_all(self):
+        try:
+            addresses = list(self.fixture_order)
+            total = len(addresses)
+            self.append_log(f"refreshing all fixtures with {self.status_timeout:g}s status timeout")
+            for index, address in enumerate(addresses, start=1):
+                fixture = self.fixtures.get(address)
+                if fixture:
+                    self.append_log(f"refresh {index}/{total}: {fixture.name}")
+                    await self.refresh_fixture(fixture)
+            self.append_log("refresh all complete")
+        finally:
+            self.refresh_all_task = None
 
     async def action_toggle_power(self):
         fixture = self.current_fixture()
@@ -772,7 +892,7 @@ class AmaranTui(App):
 
 def main():
     args = build_parser().parse_args()
-    app = AmaranTui(args.root, args.state_path, args.timeout)
+    app = AmaranTui(args.root, args.state_path, args.timeout, resolve_theme(args.theme))
     app.run()
 
 
