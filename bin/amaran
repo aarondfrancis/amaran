@@ -851,8 +851,15 @@ if raw_json:
 else:
     if not safe:
         print("No fixtures found.")
+        sys.exit(0)
+    name_width = max(len(str(fixture["name"])) for fixture in safe)
+    address_width = max(len(str(fixture["address"])) for fixture in safe)
     for fixture in safe:
-        print(f"{fixture['name']}\t{fixture['address']}\t{fixture['mac']}")
+        print(
+            f"{str(fixture['name']):<{name_width}}  "
+            f"{str(fixture['address']):>{address_width}}  "
+            f"{fixture['mac']}"
+        )
 PY
 }
 

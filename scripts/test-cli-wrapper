@@ -3,6 +3,7 @@ set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/amaran-cli-wrapper-test.XXXXXX")"
+TAB="$(printf '\t')"
 
 cleanup() {
   rm -rf "$TMPDIR"
@@ -235,6 +236,7 @@ FIXTURE_RENAME_OUTPUT="$("$ROOT/bin/amaran" fixture rename 2 desk-key --state-pa
 assert_contains "$FIXTURE_RENAME_OUTPUT" "renamed fixture 2 to desk-key" "fixture rename output"
 FIXTURE_LIST_OUTPUT="$("$ROOT/bin/amaran" list --state-path "$FRIENDLY_STATE")"
 assert_contains "$FIXTURE_LIST_OUTPUT" "desk-key" "fixture rename list display"
+assert_not_contains "$FIXTURE_LIST_OUTPUT" "$TAB" "fixture list column formatting"
 assert_not_contains "$FIXTURE_LIST_OUTPUT" "$DEVICE_KEY_SENTINEL" "fixture list redaction after rename"
 FIXTURE_RENAME_JSON="$("$ROOT/bin/amaran" fixture rename desk-key tube-left --json --state-path "$FRIENDLY_STATE")"
 assert_contains "$FIXTURE_RENAME_JSON" '"friendly_name": "tube-left"' "fixture rename json"
