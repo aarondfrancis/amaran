@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -94,44 +95,44 @@ def status_for(root, state_path, timeout, address):
 
 def control(root, state_path, timeout, entry):
     address = str(entry["node_address"])
+    base = [str(Path(root) / "bin" / "amaran")]
+    target = ["--node", address, "--state-path", str(state_path), "--timeout", str(timeout)]
     sleep_mode = entry.get("sleep_mode")
     if sleep_mode == 0:
-        command = [str(Path(root) / "bin" / "amaran"), "off", "--node", address, "--state-path", str(state_path), "--timeout", str(timeout)]
+        commands = [base + ["off"] + target]
     else:
         cct = normalize_cct_kelvin(entry.get("cct"))
         intensity = entry.get("intensity")
         if cct is not None and intensity is not None:
-            command = [
-                str(Path(root) / "bin" / "amaran"),
+            command = base + [
                 "cct",
                 str(int(cct)),
                 "--intensity",
                 f"{float(intensity):g}",
-                "--node",
-                address,
-                "--state-path",
-                str(state_path),
-                "--timeout",
-                str(timeout),
-            ]
+            ] + target
             gm = entry.get("gm")
             if gm is not None:
                 command.extend(["--gm", str(int(gm))])
+            commands = [base + ["on"] + target, command]
         elif intensity is not None:
-            command = [
-                str(Path(root) / "bin" / "amaran"),
-                "intensity",
-                f"{float(intensity):g}",
-                "--node",
-                address,
-                "--state-path",
-                str(state_path),
-                "--timeout",
-                str(timeout),
+            commands = [
+                base + ["on"] + target,
+                base + [
+                    "intensity",
+                    f"{float(intensity):g}",
+                ] + target,
             ]
         else:
-            command = [str(Path(root) / "bin" / "amaran"), "on", "--node", address, "--state-path", str(state_path), "--timeout", str(timeout)]
-    return subprocess.run(command, text=True, capture_output=True)
+            commands = [base + ["on"] + target]
+
+    result = None
+    for index, command in enumerate(commands):
+        result = subprocess.run(command, text=True, capture_output=True)
+        if result.returncode != 0:
+            return result
+        if index == 0 and len(commands) > 1:
+            time.sleep(0.15)
+    return result
 
 
 def normalize_status(fixture, status):

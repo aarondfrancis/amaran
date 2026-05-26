@@ -180,9 +180,12 @@ Implementation notes:
   `--off-node <id-or-name>` records selected fixtures as off without sending a
   status read, which avoids failures from intentionally off/asleep fixtures.
   `scene apply` restores saved intensity/CCT/green-magenta/sleep state through
-  direct runtime commands; with `--node`, it applies only matching fixture
-  entries. `scene list` and `scene show` are offline reads. Scene commands must
-  not print mesh/app/device keys.
+  direct runtime commands. For saved-on entries, it should send `on` before the
+  saved intensity/CCT/green-magenta command so programmatically off fixtures
+  wake before restore. For saved-off entries, it sends only `off`. With
+  `--node`, it applies only matching fixture entries. `scene list` and
+  `scene show` are offline reads. Scene commands must not print
+  mesh/app/device keys.
 - `./bin/amaran join-capture --output-state <capture.json>` is experimental.
   It launches `BluetoothProbe.app` as a CoreBluetooth peripheral that advertises
   Mesh Provisioning service `0x1827` and behaves as a dummy no-OOB provisionee.

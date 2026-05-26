@@ -183,9 +183,9 @@ Scenes live in the same local state file:
 magenta correction, and sleep state. Repeat `--node` to capture a selected set
 of fixtures. Use `--off-node <id-or-name>` to save a fixture as off without
 requiring a status response, which is useful when an intentionally off fixture
-would otherwise time out. `scene apply` sends direct runtime commands back to
-each saved fixture. Both commands use the mesh keys in local state, but command
-output remains redacted.
+would otherwise time out. `scene apply` wakes each saved-on fixture first, then
+sends the saved look; saved-off fixtures receive `off`. Both commands use the
+mesh keys in local state, but command output remains redacted.
 
 ## Joining An Existing Mesh
 

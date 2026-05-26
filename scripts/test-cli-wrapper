@@ -413,6 +413,10 @@ FAKE_SCENE_ROOT="$TMPDIR/fake-scene-root"
 mkdir -p "$FAKE_SCENE_ROOT/bin"
 cat > "$FAKE_SCENE_ROOT/bin/amaran" <<'SH'
 #!/bin/sh
+command="$1"
+if [ -n "${FAKE_SCENE_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FAKE_SCENE_LOG"
+fi
 node=""
 while [ $# -gt 0 ]; do
   if [ "$1" = "--node" ]; then
@@ -422,6 +426,9 @@ while [ $# -gt 0 ]; do
     shift
   fi
 done
+if [ "$command" != "status" ]; then
+  exit 0
+fi
 case "$node" in
   7)
     cat <<'JSON'
@@ -458,6 +465,30 @@ if [fixture["node_address"] for fixture in fixtures] != [7, 9, 11]:
     raise SystemExit("scene fixture selection order was not preserved")
 if fixtures[2].get("sleep_mode") != 0:
     raise SystemExit("forced-off scene fixture did not store sleep_mode 0")
+PY
+FAKE_SCENE_LOG="$TMPDIR/fake-scene.log"
+: > "$FAKE_SCENE_LOG"
+FAKE_SCENE_LOG="$FAKE_SCENE_LOG" "$ROOT/scripts/scene-store" --root "$FAKE_SCENE_ROOT" --state-path "$SCENE_MULTI_STATE" apply "multi scene" >/dev/null
+python3 - "$FAKE_SCENE_LOG" <<'PY'
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    lines = [line.strip() for line in fh if line.strip()]
+expected = [
+    "on --node 7",
+    "cct 5600 --intensity 18 --node 7",
+    "on --node 9",
+    "cct 4000 --intensity 50 --node 9",
+    "off --node 11",
+]
+cursor = 0
+for line in lines:
+    if expected[cursor] in line:
+        cursor += 1
+        if cursor == len(expected):
+            break
+if cursor != len(expected):
+    raise SystemExit(f"scene apply did not wake before restore commands: {lines}")
 PY
 
 DISCOVER_INVALID_OUTPUT="$TMPDIR/discover-invalid.out"
