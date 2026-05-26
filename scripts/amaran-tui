@@ -623,8 +623,8 @@ class AmaranTui(App):
     }
 
     .controls-row {
-        height: 3;
-        padding: 0 1;
+        height: 2;
+        padding: 1 1 0 1;
     }
 
     #scene-editor {
@@ -656,8 +656,10 @@ class AmaranTui(App):
     }
 
     Button {
-        min-width: 10;
+        height: 1;
+        min-width: 8;
         margin: 0 1 0 0;
+        padding: 0 1;
     }
 
     ValueBar {
@@ -726,7 +728,6 @@ class AmaranTui(App):
                         yield Button("Off", id="power-off", variant="error")
                         yield Button("Refresh", id="refresh-selected")
                         yield Button("Identify", id="identify")
-                    with Horizontal(classes="controls-row"):
                         yield Button("Capture", id="capture-include")
                 with Vertical(id="scenes-panel"):
                     yield Static("Scenes", classes="panel-title")
