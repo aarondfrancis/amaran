@@ -202,9 +202,11 @@ Open the local studio control surface with:
 
 The TUI lists known fixtures, refreshes live status, toggles power, adjusts
 brightness, CCT, and green-magenta correction, identifies a selected fixture,
-and applies or captures scenes. It talks to the existing CLI commands and only
-consumes redacted JSON output; it does not read or display mesh, app, or device
-keys.
+and applies or captures scenes. Scene capture is explicit: mark fixtures in the
+`cap` column to include them, and mark `off` for fixtures that should be saved
+as off without a live status read. Scene rows apply on activation. The TUI talks
+to the existing CLI commands and only consumes redacted JSON output; it does not
+read or display mesh, app, or device keys.
 
 The first run installs Textual into a private venv under
 `~/Library/Application Support/amaran-cli/python/tui` if Textual is not already
@@ -224,13 +226,15 @@ Useful keys:
 | `q` | Quit. |
 | `r` / `R` | Refresh selected fixture / all fixtures. |
 | `space` | Toggle selected fixture on or off. |
+| `x` | Include or exclude the selected fixture from the next scene capture. |
+| `o` | Mark the selected included fixture as off for the next scene capture. |
 | `+` / `-` | Brightness up or down by 1%. |
 | `[` / `]` | CCT down or up by 100K. |
 | `{` / `}` | CCT down or up by 500K. |
 | `g` / `m` | Green/magenta correction down or up by 1. |
 | `i` | Identify the selected fixture. |
 | `a` | Apply the selected scene. |
-| `c` | Capture the selected fixture into the scene name field. |
+| `c` | Capture checked fixtures into the scene name field. |
 
 ## Joining An Existing Mesh
 

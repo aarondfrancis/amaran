@@ -322,6 +322,8 @@ class AmaranTui(App):
         ("r", "refresh_selected", "Refresh"),
         ("R", "refresh_all", "Refresh all"),
         ("space", "toggle_power", "On/off"),
+        ("x", "toggle_capture_include", "Capture"),
+        ("o", "toggle_capture_off", "Off in scene"),
         ("i", "identify", "Identify"),
         ("a", "apply_scene", "Apply scene"),
         ("c", "capture_scene", "Capture"),
@@ -340,6 +342,8 @@ class AmaranTui(App):
         self.fixtures: Dict[int, FixtureView] = {}
         self.fixture_order: List[int] = []
         self.selected_address: Optional[int] = None
+        self.capture_include = set()
+        self.capture_off = set()
         self.scenes: List[SceneView] = []
         self.scene_order: List[str] = []
         self.refresh_all_task = None
@@ -362,11 +366,13 @@ class AmaranTui(App):
                         yield Button("Off", id="power-off", variant="error")
                         yield Button("Refresh", id="refresh-selected")
                         yield Button("Identify", id="identify")
+                    with Horizontal(classes="controls-row"):
+                        yield Button("Include", id="capture-include")
+                        yield Button("Save Off", id="capture-off")
                 with Vertical(id="scenes-panel"):
                     yield Static("Scenes", classes="panel-title")
                     yield DataTable(id="scenes")
                     with Horizontal(classes="controls-row"):
-                        yield Button("Apply", id="apply-scene", variant="primary")
                         yield Input(placeholder="scene name", id="scene-name")
                         yield Button("Capture", id="capture-scene")
                 with Vertical(id="log-panel"):
@@ -378,7 +384,7 @@ class AmaranTui(App):
         fixtures = self.query_one("#fixtures", DataTable)
         fixtures.cursor_type = "row"
         fixtures.zebra_stripes = True
-        fixtures.add_columns("fixture", "addr", "state", "power", "int", "cct", "gm")
+        fixtures.add_columns("fixture", "addr", "cap", "off", "state", "power", "int", "cct", "gm")
 
         scenes = self.query_one("#scenes", DataTable)
         scenes.cursor_type = "row"
@@ -473,6 +479,8 @@ class AmaranTui(App):
             return
 
         previous = self.fixtures
+        previous_include = set(self.capture_include)
+        previous_off = set(self.capture_off)
         self.fixtures = {}
         self.fixture_order = []
         for row in rows if isinstance(rows, list) else []:
@@ -503,6 +511,9 @@ class AmaranTui(App):
             self.fixture_order.append(address)
         if self.selected_address not in self.fixtures:
             self.selected_address = self.fixture_order[0] if self.fixture_order else None
+        current_addresses = set(self.fixture_order)
+        self.capture_include = previous_include & current_addresses
+        self.capture_off = previous_off & self.capture_include
         self.render_fixtures()
         self.append_log(f"loaded {len(self.fixture_order)} fixtures")
 
@@ -539,6 +550,8 @@ class AmaranTui(App):
             table.add_row(
                 fixture.name,
                 str(address),
+                "[x]" if address in self.capture_include else "[ ]",
+                "[x]" if address in self.capture_off else "[ ]",
                 self.render_status(fixture),
                 fixture.power,
                 self.render_percent(fixture.intensity),
@@ -803,8 +816,38 @@ class AmaranTui(App):
     async def action_capture_scene(self):
         await self.capture_scene()
 
+    def action_toggle_capture_include(self):
+        fixture = self.current_fixture()
+        if not fixture:
+            return
+        address = fixture.address
+        if address in self.capture_include:
+            self.capture_include.discard(address)
+            self.capture_off.discard(address)
+            self.append_log(f"excluded {fixture.name} from scene capture")
+        else:
+            self.capture_include.add(address)
+            self.append_log(f"included {fixture.name} in scene capture")
+        self.render_fixtures()
+        self.update_selected_panel()
+
+    def action_toggle_capture_off(self):
+        fixture = self.current_fixture()
+        if not fixture:
+            return
+        address = fixture.address
+        self.capture_include.add(address)
+        if address in self.capture_off:
+            self.capture_off.discard(address)
+            self.append_log(f"{fixture.name} will be captured from live status")
+        else:
+            self.capture_off.add(address)
+            self.append_log(f"{fixture.name} will be saved as off")
+        self.render_fixtures()
+        self.update_selected_panel()
+
     def action_show_help(self):
-        self.append_log("keys: q quit, r refresh, R refresh all, space on/off, +/- brightness, [] temp, g/m G/M, a apply scene, c capture, i identify")
+        self.append_log("keys: q quit, r/R refresh, space on/off, x include capture, o mark off, +/- brightness, [] temp, g/m G/M, a apply scene, c capture, i identify")
 
     async def adjust_brightness(self, delta):
         fixture = self.current_fixture()
@@ -836,10 +879,26 @@ class AmaranTui(App):
         if not name:
             self.append_log("enter a scene name before capture")
             return
-        selector_flag = "--off-node" if fixture.power == "off" else "--node"
+        included = [address for address in self.fixture_order if address in self.capture_include]
+        if not included:
+            self.append_log("select fixtures for capture with x; use o for fixtures saved as off")
+            return
+        command = ["scene", "capture", name]
+        live_count = 0
+        off_count = 0
+        for address in included:
+            target = self.fixtures.get(address)
+            if not target:
+                continue
+            if address in self.capture_off:
+                command.extend(["--off-node", target.selector])
+                off_count += 1
+            else:
+                command.extend(["--node", target.selector])
+                live_count += 1
         try:
-            await self.run_amaran("scene", "capture", name, selector_flag, fixture.selector, extra_timeout=self.command_timeout * 2)
-            self.append_log(f"captured {name} from {fixture.name}")
+            await self.run_amaran(*command, extra_timeout=self.command_timeout * 2)
+            self.append_log(f"captured {name}: {live_count} live, {off_count} off")
             await self.load_scenes()
         except CommandError as exc:
             self.append_log(f"scene capture failed: {exc.message}")
@@ -878,9 +937,13 @@ class AmaranTui(App):
     def identify_button(self, _event):
         self.schedule(self.action_identify())
 
-    @on(Button.Pressed, "#apply-scene")
-    def apply_scene_button(self, _event):
-        self.schedule(self.action_apply_scene())
+    @on(Button.Pressed, "#capture-include")
+    def capture_include_button(self, _event):
+        self.action_toggle_capture_include()
+
+    @on(Button.Pressed, "#capture-off")
+    def capture_off_button(self, _event):
+        self.action_toggle_capture_off()
 
     @on(Button.Pressed, "#capture-scene")
     def capture_scene_button(self, _event):

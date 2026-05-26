@@ -112,7 +112,10 @@ Implementation notes:
   5 seconds, so stale fixtures do not make the interface feel stuck. Theme
   defaults to auto detection: OSC 11 terminal background query first, then
   macOS appearance fallback. `AMARAN_TUI_THEME` or `--theme <auto|dark|light>`
-  can override it.
+  can override it. TUI scene capture uses fixture-table checkboxes: `cap`
+  includes a fixture in the next capture and `off` records that fixture with
+  `--off-node` instead of reading live status. Scene rows apply on activation,
+  so no separate apply button is required.
 - `./bin/amaran fixture rename <node> <friendly-name>` stores a CLI-only
   `friendly_name` on the selected fixture. Runtime commands, diagnostics, and
   scene commands should accept that friendly name anywhere `--node` is accepted.
