@@ -256,9 +256,11 @@ def status_batch_for(root, state_path, timeout, addresses):
 
 def normalize_status(address, fixture, raw_status):
     cct = raw_status.get("cct") or {}
-    intensity = cct.get("intensity")
-    if isinstance(intensity, (int, float)) and intensity > 100:
-        intensity = intensity / 10
+    intensity = cct.get("intensity_percent")
+    if intensity is None:
+        raw_intensity = cct.get("intensity")
+        if isinstance(raw_intensity, (int, float)):
+            intensity = raw_intensity / 10
     cct_kelvin = cct.get("cct_kelvin", cct.get("cct"))
     if isinstance(cct_kelvin, (int, float)) and cct_kelvin < 1000:
         cct_kelvin = cct_kelvin * 10

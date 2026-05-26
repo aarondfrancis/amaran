@@ -432,12 +432,12 @@ fi
 case "$node" in
   7)
     cat <<'JSON'
-{"address":7,"cct":{"sleep_mode":1,"cct":560,"intensity":180,"gm":10}}
+{"address":7,"cct":{"sleep_mode":1,"cct":560,"intensity":180,"intensity_percent":18,"gm":10}}
 JSON
     ;;
   9)
     cat <<'JSON'
-{"address":9,"cct":{"sleep_mode":1,"cct":400,"intensity":500,"gm":12}}
+{"address":9,"cct":{"sleep_mode":1,"cct":400,"intensity":70,"intensity_percent":7,"gm":12}}
 JSON
     ;;
   *)
@@ -452,6 +452,7 @@ assert_contains "$SCENE_MULTI_OUTPUT" "captured scene 'multi scene' with 3 fixtu
 SCENE_MULTI_SHOW="$("$ROOT/scripts/scene-store" --root "$FAKE_SCENE_ROOT" --state-path "$SCENE_MULTI_STATE" show "multi scene")"
 assert_contains "$SCENE_MULTI_SHOW" "400M5-123C21" "scene capture selected first fixture"
 assert_contains "$SCENE_MULTI_SHOW" "fill" "scene capture selected second fixture"
+assert_contains "$SCENE_MULTI_SHOW" "7%" "scene capture uses decoded intensity percent"
 assert_contains "$SCENE_MULTI_SHOW" "backlight" "scene capture forced-off fixture"
 assert_contains "$SCENE_MULTI_SHOW" "off" "scene show forced-off fixture"
 python3 - "$SCENE_MULTI_STATE" <<'PY'
@@ -478,7 +479,7 @@ expected = [
     "on --node 7",
     "cct 5600 --intensity 18 --node 7",
     "on --node 9",
-    "cct 4000 --intensity 50 --node 9",
+    "cct 4000 --intensity 7 --node 9",
     "off --node 11",
 ]
 cursor = 0
@@ -522,7 +523,8 @@ cat <<'JSON'
   "cct": {
     "sleep_mode": 1,
     "cct": 5600,
-    "intensity": 180
+    "intensity": 70,
+    "intensity_percent": 7
   }
 }
 JSON
@@ -535,6 +537,7 @@ assert_contains "$DISCOVER_COLLISION_OUTPUT" "[1/1] found address 7" "discover p
 assert_contains "$DISCOVER_COLLISION_OUTPUT" "discovered 1 fixtures" "discover source collision summary"
 assert_contains "$DISCOVER_COLLISION_OUTPUT" "runtime source moved 7->" "discover source collision relocation"
 assert_contains "$DISCOVER_COLLISION_OUTPUT" "fixture-7" "discover source collision fixture"
+assert_contains "$DISCOVER_COLLISION_OUTPUT" "7%" "discover uses decoded intensity percent"
 assert_contains "$DISCOVER_COLLISION_OUTPUT" "name       addr" "discover fixed-width table header"
 assert_not_contains "$DISCOVER_COLLISION_OUTPUT" "$TAB" "discover result table formatting"
 DISCOVER_JSON_STDOUT="$TMPDIR/discover-json.stdout"

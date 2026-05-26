@@ -137,9 +137,11 @@ def control(root, state_path, timeout, entry):
 
 def normalize_status(fixture, status):
     cct = status.get("cct") or {}
-    intensity = cct.get("intensity")
-    if isinstance(intensity, (int, float)) and intensity > 100:
-        intensity = intensity / 10
+    intensity = cct.get("intensity_percent")
+    if intensity is None:
+        raw_intensity = cct.get("intensity")
+        if isinstance(raw_intensity, (int, float)):
+            intensity = raw_intensity / 10
     cct_kelvin = normalize_cct_kelvin(cct.get("cct_kelvin", cct.get("cct")))
     return {
         "node_address": fixture.get("node_address"),
