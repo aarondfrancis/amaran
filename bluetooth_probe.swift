@@ -1379,6 +1379,7 @@ final class ProbeOptions {
     var expectedSegmentAckSegN: UInt8?
     var segmentAckMaxSendAttempts = 4
     var segmentAckRetryDelay: TimeInterval = 0.75
+    var finishAfterTelinkStatus = false
     var storeConfigCompositionData = false
     var confirmReset = false
     var advertisementCapturePath: String?
@@ -1617,6 +1618,7 @@ final class ProbeOptions {
                         requiredProxyNetworkId = prepared.requiredProxyNetworkId
                         decodeMaterial = prepared.decodeMaterial
                         nativeSendMetadata = prepared.metadata
+                        settleAfterWrite = 0.2
                         connect = true
                     } catch {
                         configurationError = String(describing: error)
@@ -1665,6 +1667,7 @@ final class ProbeOptions {
                     requiredProxyNetworkId = prepared.requiredProxyNetworkId
                     decodeMaterial = prepared.decodeMaterial
                     nativeSendMetadata = prepared.metadata
+                    finishAfterTelinkStatus = true
                     settleAfterWrite = max(settleAfterWrite, 2.0)
                     connect = true
                 } catch {
@@ -2476,6 +2479,9 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
                 : decodeProxyNotification(proxyPdu, peripheral: peripheral)
             decodedNotifications.append(decoded)
             handleSegmentAcknowledgment(decoded)
+            if options.finishAfterTelinkStatus && isTelinkCCTStatus(decoded) {
+                finish(ok: true, error: nil)
+            }
         }
     }
 
@@ -2508,6 +2514,14 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
             return "unknown/\(cbuuidString(characteristic.uuid))"
         }
         return characteristicKey(service: service, characteristic: characteristic)
+    }
+
+    private func isTelinkCCTStatus(_ decoded: [String: Any]) -> Bool {
+        guard let access = decoded["access"] as? [String: Any],
+              let telink = access["telink"] as? [String: Any] else {
+            return false
+        }
+        return telink["cct"] != nil
     }
 
     private func updateReadValue(peripheral: CBPeripheral, characteristic: CBCharacteristic, error: Error?) {
