@@ -584,6 +584,58 @@ func reserveNativeControlProxyPdu(
     )
 }
 
+func reserveNativeControlProxyPdus(
+    statePath: String,
+    nodeID: String?,
+    commands: [NativeTelinkControlCommand]
+) throws -> NativePreparedProxyPduSequence {
+    guard !commands.isEmpty else {
+        throw BluetoothProbeError.invalidState("control sequence requires at least one command")
+    }
+
+    let prepared = try commands.map { command in
+        try reserveNativeAccessProxyPdu(
+            statePath: statePath,
+            nodeID: nodeID,
+            accessMessage: command.accessMessage(),
+            metadata: command.metadata(),
+            lastReservedBy: "control-sequence",
+            sourceRole: .telinkRuntime
+        )
+    }
+
+    guard let first = prepared.first else {
+        throw BluetoothProbeError.invalidState("control sequence requires at least one prepared PDU")
+    }
+
+    let commandMetadata = prepared.map(\.metadata)
+    var metadata: [String: Any] = [
+        "control_command": "sequence",
+        "control_count": prepared.count,
+        "control_commands": commandMetadata,
+    ]
+    for key in ["address", "fixture", "iv_index", "source", "ttl"] {
+        if let value = first.metadata[key] {
+            metadata[key] = value
+        }
+    }
+    if let firstSequence = first.metadata["sequence"] {
+        metadata["sequence"] = firstSequence
+    }
+    if let lastSequenceNext = prepared.last?.metadata["sequence_next"] {
+        metadata["sequence_next"] = lastSequenceNext
+    }
+
+    return NativePreparedProxyPduSequence(
+        proxyPdus: prepared.map(\.proxyPdu),
+        requiredProxyNetworkId: first.requiredProxyNetworkId,
+        decodeMaterial: first.decodeMaterial,
+        metadata: metadata,
+        expectedSegmentAckSeqZero: nil,
+        expectedSegmentAckSegN: nil
+    )
+}
+
 func reserveNativeStatusProxyPdu(
     statePath: String,
     nodeID: String?
@@ -1572,6 +1624,34 @@ final class ProbeOptions {
                     index += 2
                 } else {
                     configurationError = "--control-test requires a command spec"
+                    index += 1
+                }
+            case "--control-sequence":
+                if index + 1 < arguments.count {
+                    do {
+                        let specs = arguments[index + 1]
+                            .split(separator: ",", omittingEmptySubsequences: true)
+                            .map { String($0).lowercased() }
+                        let commands = try specs.map { try NativeTelinkControlCommand.parse(spec: $0) }
+                        let prepared = try reserveNativeControlProxyPdus(
+                            statePath: statePath,
+                            nodeID: nodeID,
+                            commands: commands
+                        )
+                        proxyPdus = prepared.proxyPdus
+                        proxyPduLabel = "telink-0x26-control-sequence"
+                        requiredProxyNetworkId = prepared.requiredProxyNetworkId
+                        decodeMaterial = prepared.decodeMaterial
+                        nativeSendMetadata = prepared.metadata
+                        proxyWriteInterSegmentDelay = max(proxyWriteInterSegmentDelay, 0.25)
+                        settleAfterWrite = 0.2
+                        connect = true
+                    } catch {
+                        configurationError = String(describing: error)
+                    }
+                    index += 2
+                } else {
+                    configurationError = "--control-sequence requires a comma-separated command spec list"
                     index += 1
                 }
             case "--status-test":

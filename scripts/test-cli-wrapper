@@ -143,6 +143,11 @@ HELPER_RESET_OUTPUT="$TMPDIR/helper-node-reset.json"
 assert_contains "$(cat "$HELPER_RESET_OUTPUT")" '"ok" : false' "helper node reset confirmation guard"
 assert_contains "$(cat "$HELPER_RESET_OUTPUT")" "--confirm-reset" "helper node reset confirmation guard"
 
+HELPER_SEQUENCE_OUTPUT="$TMPDIR/helper-control-sequence.json"
+"$ROOT/BluetoothProbe.app/Contents/MacOS/BluetoothProbe" --output "$HELPER_SEQUENCE_OUTPUT" --control-sequence ""
+assert_contains "$(cat "$HELPER_SEQUENCE_OUTPUT")" '"ok" : false' "helper control sequence empty guard"
+assert_contains "$(cat "$HELPER_SEQUENCE_OUTPUT")" "control sequence requires at least one command" "helper control sequence empty guard"
+
 EXISTING_STATE="$TMPDIR/existing-state.json"
 printf '{"not":"real-state"}\n' > "$EXISTING_STATE"
 PREFLIGHT_OUTPUT="$("$ROOT/bin/amaran" pair --dry-run --state-path "$EXISTING_STATE")"

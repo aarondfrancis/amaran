@@ -99,7 +99,9 @@ Implementation notes:
 - `./bin/amaran identify [<id-or-name>]` reads vendor status, blinks the
   selected fixture three times, then restores the previous on/off, intensity,
   and CCT state. It should use direct runtime commands, accept friendly names,
-  and avoid printing key material.
+  and avoid printing key material. After the initial status read, it should send
+  the blink/restore commands as one batched helper control sequence so it does
+  not repeatedly scan/connect for each flash step.
 - `doctor` runs directly in the wrapper. It reports local state, safe runtime
   counters, and control readiness without launching BLE. It does not print key
   material.

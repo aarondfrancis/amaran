@@ -3316,6 +3316,54 @@ run_native_control_quiet_spec() {
   return "$command_status"
 }
 
+run_native_control_sequence_quiet() {
+  if [[ $# -eq 0 ]]; then
+    echo "amaran: control sequence requires at least one command" >&2
+    return 1
+  fi
+
+  local output
+  output="$(mktemp -t amaran-control-sequence)"
+  local specs=("$@")
+  local sequence_spec="${(j:,:)specs}"
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH")
+  if [[ -n "$NODE_ID" ]]; then
+    args+=(--node "$NODE_ID")
+  fi
+  args+=(--control-sequence "$sequence_spec")
+
+  launch_app "$NATIVE_APP" "${args[@]}"
+
+  if [[ ! -s "$output" ]]; then
+    rm -f "$output"
+    echo "amaran: control sequence did not write a result" >&2
+    return 1
+  fi
+
+  /usr/bin/python3 - "$output" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+if payload.get("ok"):
+    sys.exit(0)
+
+data = payload.get("data", {})
+detail = payload.get("error")
+if not detail and data.get("central_state"):
+    detail = f"control sequence failed (central_state {data['central_state']})"
+if not detail:
+    detail = "control sequence failed"
+print(f"amaran: {detail}", file=sys.stderr)
+sys.exit(1)
+PY
+  local helper_status=$?
+  rm -f "$output"
+  return "$helper_status"
+}
+
 run_control_command() {
   local action="$1"
   shift
@@ -3457,33 +3505,21 @@ PY
 
   local count=3
   local index
+  local sequence_specs=()
   for index in 1 2 3; do
     if [[ "$original_state" == "off" ]]; then
-      run_native_control_quiet_spec on || return 1
-      sleep 0.15
-      run_native_control_quiet_spec "$flash_on_spec" || return 1
-      sleep 0.45
-      run_native_control_quiet_spec off || return 1
-      sleep 0.45
+      sequence_specs+=(on "$flash_on_spec" off)
     else
-      run_native_control_quiet_spec off || return 1
-      sleep 0.45
-      run_native_control_quiet_spec on || return 1
-      sleep 0.15
-      run_native_control_quiet_spec "$restore_spec" || return 1
-      sleep 0.45
+      sequence_specs+=(off on "$restore_spec")
     fi
   done
 
   if [[ "$original_state" == "off" ]]; then
-    run_native_control_quiet_spec off || return 1
+    sequence_specs+=(off)
   else
-    run_native_control_quiet_spec on || return 1
-    sleep 0.15
-    run_native_control_quiet_spec "$restore_spec" || return 1
-    sleep 0.15
-    run_native_control_quiet_spec "$restore_spec" || return 1
+    sequence_specs+=(on "$restore_spec" "$restore_spec")
   fi
+  run_native_control_sequence_quiet "${sequence_specs[@]}" || return 1
 
   if [[ "$JSON" == "1" ]]; then
     PLAN_JSON="$plan_json" /usr/bin/python3 - "$count" <<'PY'
