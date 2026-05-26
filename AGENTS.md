@@ -69,6 +69,8 @@ Useful commands:
 - `./bin/amaran scene list --json`
 - `./bin/amaran scene show <name>`
 - `./bin/amaran scene show <name> --json`
+- `./bin/amaran daemon [start|status|stop]`
+- `./bin/amaran daemon [start|status|stop] --json`
 - `./bin/amaran list`
 - `./bin/amaran probe`
 - `./bin/amaran status`
@@ -90,6 +92,12 @@ Implementation notes:
 - `list`, `probe`, `status`, `identify`, `on`, `off`, `intensity`, and `cct` are direct
   runtime commands. They require local CLI state and must not silently fall back
   to third-party app databases or helper bundles.
+- `status`, `identify`, `on`, `off`, `intensity`, and `cct` should prefer the
+  auto-started local runtime daemon in `BluetoothProbe.app` when available.
+  The daemon listens only on localhost, writes non-secret port metadata under
+  `~/Library/Application Support/amaran-cli/daemon.json`, keeps CoreBluetooth
+  alive, and may reuse a Mesh Proxy connection for repeated commands. Set
+  `AMARAN_DAEMON_DISABLE=1` to force the older one-shot helper path.
 - `./bin/amaran fixture rename <node> <friendly-name>` stores a CLI-only
   `friendly_name` on the selected fixture. Runtime commands, diagnostics, and
   scene commands should accept that friendly name anywhere `--node` is accepted.

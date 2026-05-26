@@ -5,9 +5,11 @@ Local CLI control for owned amaran fixtures on macOS.
 The CLI keeps its own JSON studio manifest in
 `~/Library/Application Support/amaran-cli/state.json` and talks to fixtures
 directly through the signed `BluetoothProbe.app` CoreBluetooth helper. Runtime
-commands are direct: there is no Desktop helper fallback. The recommended
-studio flow is to keep Sidus Link Pro on the iPad as the pairing source of
-truth, then import that mesh metadata from an encrypted local iPad backup.
+commands are direct: there is no Desktop helper fallback. Runtime BLE commands
+auto-start a local `BluetoothProbe.app` daemon so repeated commands can reuse
+CoreBluetooth and the Mesh Proxy connection. The recommended studio flow is to
+keep Sidus Link Pro on the iPad as the pairing source of truth, then import
+that mesh metadata from an encrypted local iPad backup.
 
 ```sh
 ./bin/amaran help
@@ -43,6 +45,7 @@ truth, then import that mesh metadata from an encrypted local iPad backup.
 ./bin/amaran fixture clear-name desk-key
 ./bin/amaran scene list
 ./bin/amaran scene show "recording scene"
+./bin/amaran daemon status
 ./bin/amaran list
 ./bin/amaran probe
 ./bin/amaran status
@@ -75,8 +78,10 @@ suffixes, but must not print key material.
 The CLI does not load a `.env` file, and DeviceKeys should not live in one.
 Environment variables are only convenience defaults such as `AMARAN_NODE_ID`,
 `AMARAN_TIMEOUT`, `AMARAN_CLI_STATE_PATH`, and the optional
-`AMARAN_IOS_BACKUP_PASSWORD` import helper. The key-bearing file is the local
-state manifest, normally
+`AMARAN_IOS_BACKUP_PASSWORD` import helper. `AMARAN_DAEMON_DISABLE=1` forces
+the older one-shot helper path, and `AMARAN_DAEMON_PORT_FILE` overrides the
+non-secret daemon port metadata path. The key-bearing file is the local state
+manifest, normally
 `~/Library/Application Support/amaran-cli/state.json`.
 
 Commands reserve sequence numbers in that state. DeviceKey Config sends
@@ -282,6 +287,8 @@ so the current state for that fixture should be treated as stale afterward.
 ## Command Reference
 
 Stable runtime commands require local CLI state and use the Mesh Proxy path.
+They prefer the auto-started local daemon for speed and fall back to the
+one-shot helper path if the daemon cannot be reached.
 
 | Command | Purpose |
 | --- | --- |
@@ -293,6 +300,7 @@ Stable runtime commands require local CLI state and use the Mesh Proxy path.
 | `./bin/amaran off [--node <id-or-name>]` | Send Telink vendor off. |
 | `./bin/amaran intensity <0-100> [--node <id-or-name>]` | Send Telink brightness in percent. |
 | `./bin/amaran cct <kelvin> [--intensity <0-100>] [--node <id-or-name>]` | Send Telink CCT. Without `--intensity`, the CLI reads status first and preserves the current intensity. |
+| `./bin/amaran daemon [start\|status\|stop] [--json]` | Start, inspect, or stop the local runtime daemon without sending fixture control commands. Runtime commands auto-start it when needed. |
 
 State and pairing commands manage local state and fixture setup.
 

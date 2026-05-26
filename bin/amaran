@@ -6,6 +6,8 @@ NATIVE_APP="$ROOT/BluetoothProbe.app"
 TIMEOUT="${AMARAN_TIMEOUT:-20}"
 NODE_ID="${AMARAN_NODE_ID:-}"
 STATE_PATH="${AMARAN_CLI_STATE_PATH:-$HOME/Library/Application Support/amaran-cli/state.json}"
+DAEMON_PORT_FILE="${AMARAN_DAEMON_PORT_FILE:-$HOME/Library/Application Support/amaran-cli/daemon.json}"
+DAEMON_DISABLE="${AMARAN_DAEMON_DISABLE:-0}"
 ATTENTION_DURATION="${AMARAN_ATTENTION_DURATION:-0}"
 DRY_RUN=0
 VERIFY=0
@@ -42,6 +44,7 @@ Usage:
   amaran scene apply <name> [--node <id|name>] [--json]
   amaran scene list [--json]
   amaran scene show <name> [--json]
+  amaran daemon [start|status|stop] [--json]
   amaran list [--json]
   amaran probe [--node <id|name>] [--json]
   amaran status [--node <id|name>] [--json]
@@ -109,6 +112,12 @@ Stable runtime commands:
   cct        Send Telink CCT in Kelvin. Without --intensity, reads status first
              and preserves the current intensity.
 
+Runtime daemon:
+  Runtime BLE commands auto-start a local BluetoothProbe.app daemon when one is
+  not already running. The daemon keeps CoreBluetooth alive and can reuse the
+  Mesh Proxy connection for faster repeated commands. Set
+  AMARAN_DAEMON_DISABLE=1 to force the older one-shot helper path.
+
 State and pairing:
   doctor         Inspect local state, runtime counters, and control readiness.
   sidus-import   Import a Sidus Link Pro iPad backup into local CLI state. This
@@ -130,6 +139,7 @@ State and pairing:
                  in CLI state and do not change Sidus Link Pro metadata.
   scene          Capture, list, show, and apply named fixture states. Capturing
                  reads live status; applying sends direct runtime commands.
+  daemon         Start, inspect, or stop the local runtime daemon.
 
 Diagnostics:
   gatt-probe                       Discover Mesh Proxy/Provisioning services.
@@ -152,6 +162,9 @@ Environment:
   AMARAN_CLI_STATE_PATH        Default --state-path.
   AMARAN_NODE_ID               Default --node.
   AMARAN_TIMEOUT               Default --timeout.
+  AMARAN_DAEMON_PORT_FILE      Local daemon port metadata. Defaults under
+                               ~/Library/Application Support/amaran-cli.
+  AMARAN_DAEMON_DISABLE        Set to 1 to disable the runtime daemon.
   AMARAN_ATTENTION_DURATION    Default --attention.
   AMARAN_IOS_BACKUP_PASSWORD   Optional password source for encrypted local
                                iPad backups. Prefer the interactive prompt
@@ -461,6 +474,108 @@ launch_app() {
   local app="$1"
   shift
   /usr/bin/open -W "$app" --args "$@"
+}
+
+daemon_request() {
+  local action="$1"
+  shift
+  if [[ "$DAEMON_DISABLE" == "1" ]]; then
+    return 2
+  fi
+
+  /usr/bin/python3 - "$NATIVE_APP" "$DAEMON_PORT_FILE" "$action" "$STATE_PATH" "$NODE_ID" "$TIMEOUT" "$@" <<'PY'
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+
+app, port_file, action, state_path, node_id, timeout_s, *args = sys.argv[1:]
+try:
+    command_timeout = max(1.0, float(timeout_s))
+except ValueError:
+    command_timeout = 20.0
+
+def read_port():
+    try:
+        with open(os.path.expanduser(port_file), "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        port = int(payload.get("port", 0))
+        if port <= 0:
+            return None
+        return port
+    except Exception:
+        return None
+
+def exchange(payload, timeout=1.0):
+    port = read_port()
+    if port is None:
+        raise OSError("daemon port file is missing")
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as sock:
+        sock.settimeout(timeout)
+        sock.sendall(json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n")
+        chunks = []
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if b"\n" in chunk:
+                break
+    data = b"".join(chunks).strip()
+    if not data:
+        raise OSError("daemon returned an empty response")
+    return data.decode("utf-8")
+
+def ping():
+    try:
+        response = json.loads(exchange({"action": "ping"}, timeout=0.5))
+        return bool(response.get("ok"))
+    except Exception:
+        return False
+
+def start_daemon():
+    os.makedirs(os.path.dirname(os.path.expanduser(port_file)), mode=0o700, exist_ok=True)
+    try:
+        os.unlink(os.path.expanduser(port_file))
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    subprocess.Popen(
+        ["/usr/bin/open", "-g", app, "--args", "--daemon", "--daemon-port-file", os.path.expanduser(port_file)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        if ping():
+            return True
+        time.sleep(0.1)
+    return False
+
+if not ping() and not start_daemon():
+    sys.exit(2)
+
+request = {"action": action}
+if action in {"control", "control_sequence", "status"}:
+    request["state_path"] = state_path
+    request["timeout"] = command_timeout
+    if node_id:
+        request["node_id"] = node_id
+if action == "control":
+    if not args:
+        sys.exit(2)
+    request["spec"] = args[0]
+elif action == "control_sequence":
+    request["specs"] = args
+
+try:
+    print(exchange(request, timeout=command_timeout + 2.0))
+except Exception:
+    sys.exit(2)
+PY
 }
 
 capture_native_json() {
@@ -2514,7 +2629,12 @@ run_native_control_app() {
   fi
   args+=(--control-test "$spec")
 
-  launch_app "$NATIVE_APP" "${args[@]}"
+  local daemon_response
+  if daemon_response="$(daemon_request control "$spec")"; then
+    print -r -- "$daemon_response" > "$output"
+  else
+    launch_app "$NATIVE_APP" "${args[@]}"
+  fi
 
   if [[ ! -s "$output" ]]; then
     rm -f "$output"
@@ -2574,7 +2694,12 @@ run_native_status_app() {
   fi
   args+=(--status-test)
 
-  launch_app "$NATIVE_APP" "${args[@]}"
+  local daemon_response
+  if daemon_response="$(daemon_request status)"; then
+    print -r -- "$daemon_response" > "$output"
+  else
+    launch_app "$NATIVE_APP" "${args[@]}"
+  fi
 
   if [[ ! -s "$output" ]]; then
     rm -f "$output"
@@ -3339,7 +3464,12 @@ run_native_control_sequence_quiet() {
   fi
   args+=(--control-sequence "$sequence_spec")
 
-  launch_app "$NATIVE_APP" "${args[@]}"
+  local daemon_response
+  if daemon_response="$(daemon_request control_sequence "${specs[@]}")"; then
+    print -r -- "$daemon_response" > "$output"
+  else
+    launch_app "$NATIVE_APP" "${args[@]}"
+  fi
 
   if [[ ! -s "$output" ]]; then
     rm -f "$output"
@@ -3565,6 +3695,49 @@ run_list_command() {
   run_local_state_list
 }
 
+run_daemon_command() {
+  local action="${POSITIONALS[1]:-status}"
+  local response
+  case "$action" in
+    start|status)
+      if ! response="$(daemon_request ping)"; then
+        echo "amaran: daemon is not reachable" >&2
+        return 1
+      fi
+      if [[ "$JSON" == "1" ]]; then
+        print -r -- "$response"
+      else
+        DAEMON_JSON="$response" /usr/bin/python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["DAEMON_JSON"])
+data = payload.get("data") or {}
+daemon = data.get("daemon") or {}
+state = data.get("central_state", "unknown")
+connected = "yes" if data.get("connected") else "no"
+print(f"daemon running: pid {daemon.get('pid')}, bluetooth {state}, connected {connected}")
+PY
+      fi
+      ;;
+    stop)
+      if ! response="$(daemon_request shutdown)"; then
+        echo "amaran: daemon is not reachable" >&2
+        return 1
+      fi
+      if [[ "$JSON" == "1" ]]; then
+        print -r -- "$response"
+      else
+        echo "daemon stopped"
+      fi
+      ;;
+    *)
+      echo "amaran: daemon requires start, status, or stop" >&2
+      return 1
+      ;;
+  esac
+}
+
 case "$COMMAND" in
   doctor)
     run_direct_doctor
@@ -3647,6 +3820,9 @@ case "$COMMAND" in
     ;;
   scene)
     run_scene_command
+    ;;
+  daemon)
+    run_daemon_command
     ;;
   list)
     run_list_command

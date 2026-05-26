@@ -1,5 +1,7 @@
 import CoreBluetooth
+import Darwin
 import Foundation
+import Network
 
 let meshProxyService = CBUUID(string: "1828")
 let meshProvisioningService = CBUUID(string: "1827")
@@ -1836,6 +1838,740 @@ final class ProbeOptions {
             return [proxyPdu]
         }
         return []
+    }
+}
+
+struct RuntimeDaemonOptions {
+    let portFile: String
+
+    init(arguments: [String]) {
+        var portFile = "\(NSHomeDirectory())/Library/Application Support/amaran-cli/daemon.json"
+        var index = 1
+        while index < arguments.count {
+            if arguments[index] == "--daemon-port-file", index + 1 < arguments.count {
+                portFile = (arguments[index + 1] as NSString).expandingTildeInPath
+                index += 2
+            } else {
+                index += 1
+            }
+        }
+        self.portFile = portFile
+    }
+}
+
+final class RuntimeDaemonCommand {
+    let connection: NWConnection
+    let action: String
+    let proxyPdus: [[UInt8]]
+    let requiredProxyNetworkId: [UInt8]
+    let decodeMaterial: NativeDecodeMaterial
+    let nativeSendMetadata: [String: Any]
+    let finishAfterTelinkStatus: Bool
+    let settleAfterWrite: TimeInterval
+    let timeout: TimeInterval
+    let startedAt = Date()
+    var timeoutWorkItem: DispatchWorkItem?
+    var proxyWritePdus: [[UInt8]] = []
+    var proxyWriteStarted = false
+    var proxyWriteCompleted = false
+    var proxyWriteType = "none"
+    var proxyWriteIndex = 0
+    var proxyWriteMaxLength = 0
+    var proxyWriteLogicalPduCount = 0
+    var proxyWriteLogicalBytes = 0
+    var proxyWriteSegmentsWrittenTotal = 0
+    var proxyWriteSegmentLengths: [Int] = []
+    var notificationLengths: [Int] = []
+    var decodedNotifications: [[String: Any]] = []
+
+    init(
+        connection: NWConnection,
+        action: String,
+        proxyPdus: [[UInt8]],
+        requiredProxyNetworkId: [UInt8],
+        decodeMaterial: NativeDecodeMaterial,
+        nativeSendMetadata: [String: Any],
+        finishAfterTelinkStatus: Bool,
+        settleAfterWrite: TimeInterval,
+        timeout: TimeInterval
+    ) {
+        self.connection = connection
+        self.action = action
+        self.proxyPdus = proxyPdus
+        self.requiredProxyNetworkId = requiredProxyNetworkId
+        self.decodeMaterial = decodeMaterial
+        self.nativeSendMetadata = nativeSendMetadata
+        self.finishAfterTelinkStatus = finishAfterTelinkStatus
+        self.settleAfterWrite = settleAfterWrite
+        self.timeout = timeout
+    }
+}
+
+final class MeshRuntimeDaemon: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
+    private let options: RuntimeDaemonOptions
+    private let listener: NWListener
+    private var manager: CBCentralManager?
+    private var centralState = "unknown"
+    private var selectedPeripheral: CBPeripheral?
+    private var connectedNetworkId: [UInt8]?
+    private var proxyDataInCharacteristic: CBCharacteristic?
+    private var proxyDataOutCharacteristic: CBCharacteristic?
+    private var pendingCharacteristicServices = Set<String>()
+    private var proxyNotificationsReady = false
+    private var commandQueue: [RuntimeDaemonCommand] = []
+    private var activeCommand: RuntimeDaemonCommand?
+    private var scanning = false
+
+    init(options: RuntimeDaemonOptions) throws {
+        self.options = options
+        self.listener = try NWListener(using: .tcp, on: 0)
+        super.init()
+        self.manager = CBCentralManager(delegate: self, queue: DispatchQueue.main)
+        configureListener()
+    }
+
+    func start() {
+        listener.start(queue: .main)
+    }
+
+    private func configureListener() {
+        listener.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            if case .ready = state, let port = self.listener.port {
+                self.writePortFile(port: Int(port.rawValue))
+            }
+        }
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.accept(connection)
+        }
+    }
+
+    private func writePortFile(port: Int) {
+        do {
+            let url = URL(fileURLWithPath: options.portFile)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            let payload: [String: Any] = [
+                "pid": Int(getpid()),
+                "port": port,
+                "started_at": isoTimestamp(),
+            ]
+            try writeJSONPayload(payload, to: options.portFile)
+        } catch {
+            fputs("failed to write daemon port file: \(error.localizedDescription)\n", stderr)
+        }
+    }
+
+    private func accept(_ connection: NWConnection) {
+        connection.start(queue: .main)
+        receive(connection: connection, buffer: Data())
+    }
+
+    private func receive(connection: NWConnection, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            if let error {
+                self.sendError("daemon request read failed: \(error.localizedDescription)", connection: connection)
+                return
+            }
+
+            var nextBuffer = buffer
+            if let data {
+                nextBuffer.append(data)
+            }
+            if let newline = nextBuffer.firstIndex(of: 0x0a) {
+                let requestData = nextBuffer[..<newline]
+                self.handleRequestData(Data(requestData), connection: connection)
+                return
+            }
+            if isComplete {
+                self.handleRequestData(nextBuffer, connection: connection)
+                return
+            }
+            self.receive(connection: connection, buffer: nextBuffer)
+        }
+    }
+
+    private func handleRequestData(_ data: Data, connection: NWConnection) {
+        do {
+            guard let request = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw BluetoothProbeError.invalidState("daemon request must be a JSON object")
+            }
+            try handleRequest(request, connection: connection)
+        } catch {
+            sendError(String(describing: error), connection: connection)
+        }
+    }
+
+    private func handleRequest(_ request: [String: Any], connection: NWConnection) throws {
+        let action = jsonString(request["action"]) ?? ""
+        switch action {
+        case "ping":
+            sendPayload([
+                "ok": true,
+                "data": [
+                    "daemon": daemonSummary(),
+                    "central_state": centralState,
+                    "connected": selectedPeripheral?.state == .connected,
+                ],
+            ], connection: connection)
+        case "shutdown":
+            sendPayload(["ok": true, "data": ["daemon": daemonSummary(), "shutdown": true]], connection: connection)
+            listener.cancel()
+            try? FileManager.default.removeItem(atPath: options.portFile)
+            DispatchQueue.main.async {
+                CFRunLoopStop(CFRunLoopGetMain())
+            }
+        case "control", "control_sequence", "status":
+            let command = try makeCommand(action: action, request: request, connection: connection)
+            commandQueue.append(command)
+            processQueue()
+        default:
+            throw BluetoothProbeError.invalidState("unknown daemon action: \(action)")
+        }
+    }
+
+    private func makeCommand(action: String, request: [String: Any], connection: NWConnection) throws -> RuntimeDaemonCommand {
+        guard let statePath = jsonString(request["state_path"]), !statePath.isEmpty else {
+            throw BluetoothProbeError.invalidState("daemon request missing state_path")
+        }
+        let nodeID = jsonString(request["node_id"])
+        let timeout = max(1.0, (request["timeout"] as? NSNumber)?.doubleValue ?? 10.0)
+
+        switch action {
+        case "control":
+            guard let spec = jsonString(request["spec"]) else {
+                throw BluetoothProbeError.invalidState("control request missing spec")
+            }
+            let prepared = try reserveNativeControlProxyPdu(
+                statePath: statePath,
+                nodeID: nodeID,
+                command: try NativeTelinkControlCommand.parse(spec: spec.lowercased())
+            )
+            return RuntimeDaemonCommand(
+                connection: connection,
+                action: action,
+                proxyPdus: [prepared.proxyPdu],
+                requiredProxyNetworkId: prepared.requiredProxyNetworkId,
+                decodeMaterial: prepared.decodeMaterial,
+                nativeSendMetadata: prepared.metadata,
+                finishAfterTelinkStatus: false,
+                settleAfterWrite: 0.05,
+                timeout: timeout
+            )
+        case "control_sequence":
+            guard let specs = request["specs"] as? [String], !specs.isEmpty else {
+                throw BluetoothProbeError.invalidState("control_sequence request missing specs")
+            }
+            let commands = try specs.map { try NativeTelinkControlCommand.parse(spec: $0.lowercased()) }
+            let prepared = try reserveNativeControlProxyPdus(statePath: statePath, nodeID: nodeID, commands: commands)
+            return RuntimeDaemonCommand(
+                connection: connection,
+                action: action,
+                proxyPdus: prepared.proxyPdus,
+                requiredProxyNetworkId: prepared.requiredProxyNetworkId,
+                decodeMaterial: prepared.decodeMaterial,
+                nativeSendMetadata: prepared.metadata,
+                finishAfterTelinkStatus: false,
+                settleAfterWrite: 0.1,
+                timeout: timeout
+            )
+        case "status":
+            let prepared = try reserveNativeStatusProxyPdu(statePath: statePath, nodeID: nodeID)
+            return RuntimeDaemonCommand(
+                connection: connection,
+                action: action,
+                proxyPdus: [prepared.proxyPdu],
+                requiredProxyNetworkId: prepared.requiredProxyNetworkId,
+                decodeMaterial: prepared.decodeMaterial,
+                nativeSendMetadata: prepared.metadata,
+                finishAfterTelinkStatus: true,
+                settleAfterWrite: 0.0,
+                timeout: timeout
+            )
+        default:
+            throw BluetoothProbeError.invalidState("unsupported runtime daemon command: \(action)")
+        }
+    }
+
+    private func processQueue() {
+        guard activeCommand == nil, !commandQueue.isEmpty else {
+            return
+        }
+        guard centralState == "poweredOn" else {
+            if centralState == "unknown" || centralState == "resetting" {
+                return
+            }
+            let command = commandQueue.removeFirst()
+            sendError("Bluetooth is \(centralState)", connection: command.connection)
+            processQueue()
+            return
+        }
+
+        let command = commandQueue.removeFirst()
+        activeCommand = command
+        let timeoutWork = DispatchWorkItem { [weak self, weak command] in
+            guard let self, let command, self.activeCommand === command else { return }
+            self.finishActive(ok: false, error: "runtime command timed out")
+        }
+        command.timeoutWorkItem = timeoutWork
+        DispatchQueue.main.asyncAfter(deadline: .now() + command.timeout, execute: timeoutWork)
+
+        if selectedPeripheral?.state == .connected,
+           connectedNetworkId == command.requiredProxyNetworkId,
+           proxyDataInCharacteristic != nil {
+            startActiveWriteWhenReady()
+        } else {
+            reconnectForActiveCommand()
+        }
+    }
+
+    private func reconnectForActiveCommand() {
+        if let selectedPeripheral, selectedPeripheral.state == .connected {
+            manager?.cancelPeripheralConnection(selectedPeripheral)
+        }
+        selectedPeripheral = nil
+        connectedNetworkId = nil
+        proxyDataInCharacteristic = nil
+        proxyDataOutCharacteristic = nil
+        proxyNotificationsReady = false
+        pendingCharacteristicServices.removeAll()
+        startScanForActiveCommand()
+    }
+
+    private func startScanForActiveCommand() {
+        guard !scanning, activeCommand != nil, centralState == "poweredOn" else {
+            return
+        }
+        scanning = true
+        manager?.scanForPeripherals(
+            withServices: [meshProxyService],
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
+        )
+    }
+
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        centralState = centralStateName(central.state)
+        if central.state == .poweredOn {
+            processQueue()
+        } else if central.state == .unauthorized || central.state == .unsupported || central.state == .poweredOff {
+            if activeCommand != nil {
+                finishActive(ok: false, error: "Bluetooth is \(centralState)")
+            }
+        }
+    }
+
+    func centralManager(
+        _ central: CBCentralManager,
+        didDiscover peripheral: CBPeripheral,
+        advertisementData: [String: Any],
+        rssi RSSI: NSNumber
+    ) {
+        guard let activeCommand, proxyNetworkMatches(advertisementData: advertisementData, networkId: activeCommand.requiredProxyNetworkId) else {
+            return
+        }
+        scanning = false
+        central.stopScan()
+        selectedPeripheral = peripheral
+        connectedNetworkId = activeCommand.requiredProxyNetworkId
+        peripheral.delegate = self
+        central.connect(peripheral, options: nil)
+    }
+
+    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        peripheral.discoverServices([meshProxyService])
+    }
+
+    func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        finishActive(ok: false, error: error?.localizedDescription ?? "Mesh Proxy connect failed")
+    }
+
+    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        if selectedPeripheral === peripheral {
+            selectedPeripheral = nil
+            connectedNetworkId = nil
+            proxyDataInCharacteristic = nil
+            proxyDataOutCharacteristic = nil
+            proxyNotificationsReady = false
+        }
+        if activeCommand != nil {
+            finishActive(ok: false, error: error?.localizedDescription ?? "Mesh Proxy disconnected")
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        if let error {
+            finishActive(ok: false, error: "Mesh Proxy service discovery failed: \(error.localizedDescription)")
+            return
+        }
+        let services = peripheral.services ?? []
+        pendingCharacteristicServices = Set(services.map { cbuuidString($0.uuid) })
+        if pendingCharacteristicServices.isEmpty {
+            finishActive(ok: false, error: "Mesh Proxy service not found")
+            return
+        }
+        for service in services {
+            peripheral.discoverCharacteristics([meshProxyDataIn, meshProxyDataOut], for: service)
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        if let error {
+            finishActive(ok: false, error: "Mesh Proxy characteristic discovery failed: \(error.localizedDescription)")
+            return
+        }
+        for characteristic in service.characteristics ?? [] {
+            if characteristic.uuid == meshProxyDataIn {
+                proxyDataInCharacteristic = characteristic
+            } else if characteristic.uuid == meshProxyDataOut {
+                proxyDataOutCharacteristic = characteristic
+            }
+        }
+        pendingCharacteristicServices.remove(cbuuidString(service.uuid))
+        if pendingCharacteristicServices.isEmpty {
+            startActiveWriteWhenReady()
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        guard characteristic.uuid == meshProxyDataOut else {
+            return
+        }
+        if let error {
+            finishActive(ok: false, error: "Mesh Proxy Data Out notification subscribe failed: \(error.localizedDescription)")
+            return
+        }
+        proxyNotificationsReady = characteristic.isNotifying
+        startActiveWrite()
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard characteristic.uuid == meshProxyDataIn, let activeCommand else {
+            return
+        }
+        if let error {
+            finishActive(ok: false, error: "Mesh Proxy Data In write failed: \(error.localizedDescription)")
+            return
+        }
+        activeCommand.proxyWriteIndex += 1
+        activeCommand.proxyWriteSegmentsWrittenTotal += 1
+        if activeCommand.proxyWriteIndex >= activeCommand.proxyWritePdus.count {
+            completeActiveWrites()
+        } else {
+            writeNextActivePdu()
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard characteristic.uuid == meshProxyDataOut, let activeCommand else {
+            return
+        }
+        if error == nil, let value = characteristic.value {
+            let proxyPdu = Array(value)
+            activeCommand.notificationLengths.append(proxyPdu.count)
+            let decoded = decodeRuntimeProxyNotification(proxyPdu, material: activeCommand.decodeMaterial)
+            activeCommand.decodedNotifications.append(decoded)
+            if activeCommand.finishAfterTelinkStatus && isTelinkCCTStatus(decoded) {
+                finishActive(ok: true, error: nil)
+            }
+        }
+    }
+
+    func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+        writeNextActivePdu()
+    }
+
+    private func startActiveWriteWhenReady() {
+        guard let peripheral = selectedPeripheral,
+              let output = proxyDataOutCharacteristic,
+              output.properties.contains(.notify) || output.properties.contains(.indicate) else {
+            startActiveWrite()
+            return
+        }
+        if proxyNotificationsReady || output.isNotifying {
+            proxyNotificationsReady = true
+            startActiveWrite()
+        } else {
+            peripheral.setNotifyValue(true, for: output)
+        }
+    }
+
+    private func startActiveWrite() {
+        guard let activeCommand, !activeCommand.proxyWriteStarted else {
+            return
+        }
+        guard let peripheral = selectedPeripheral, peripheral.state == .connected else {
+            reconnectForActiveCommand()
+            return
+        }
+        guard let input = proxyDataInCharacteristic else {
+            finishActive(ok: false, error: "Mesh Proxy Data In characteristic not found")
+            return
+        }
+
+        do {
+            let writeType: CBCharacteristicWriteType = input.properties.contains(.writeWithoutResponse)
+                ? .withoutResponse
+                : .withResponse
+            activeCommand.proxyWriteStarted = true
+            activeCommand.proxyWriteIndex = 0
+            activeCommand.proxyWriteMaxLength = peripheral.maximumWriteValueLength(for: writeType)
+            activeCommand.proxyWriteLogicalPduCount = activeCommand.proxyPdus.count
+            activeCommand.proxyWriteLogicalBytes = activeCommand.proxyPdus.reduce(0) { $0 + $1.count }
+            activeCommand.proxyWritePdus = try activeCommand.proxyPdus.flatMap {
+                try segmentProxyProtocolPdu($0, maxWriteLength: activeCommand.proxyWriteMaxLength)
+            }
+            activeCommand.proxyWriteSegmentLengths = activeCommand.proxyWritePdus.map(\.count)
+            writeNextActivePdu()
+        } catch {
+            finishActive(ok: false, error: String(describing: error))
+        }
+    }
+
+    private func writeNextActivePdu() {
+        guard let activeCommand,
+              activeCommand.proxyWriteStarted,
+              !activeCommand.proxyWriteCompleted else {
+            return
+        }
+        guard activeCommand.proxyWriteIndex < activeCommand.proxyWritePdus.count else {
+            completeActiveWrites()
+            return
+        }
+        guard let peripheral = selectedPeripheral,
+              let input = proxyDataInCharacteristic else {
+            finishActive(ok: false, error: "Mesh Proxy Data In characteristic not ready")
+            return
+        }
+
+        let data = Data(activeCommand.proxyWritePdus[activeCommand.proxyWriteIndex])
+        if input.properties.contains(.writeWithoutResponse) {
+            guard peripheral.canSendWriteWithoutResponse else {
+                return
+            }
+            activeCommand.proxyWriteType = "withoutResponse"
+            peripheral.writeValue(data, for: input, type: .withoutResponse)
+            activeCommand.proxyWriteIndex += 1
+            activeCommand.proxyWriteSegmentsWrittenTotal += 1
+            if activeCommand.proxyWriteIndex >= activeCommand.proxyWritePdus.count {
+                completeActiveWrites()
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in
+                    self?.writeNextActivePdu()
+                }
+            }
+        } else if input.properties.contains(.write) {
+            activeCommand.proxyWriteType = "withResponse"
+            peripheral.writeValue(data, for: input, type: .withResponse)
+        } else {
+            finishActive(ok: false, error: "Mesh Proxy Data In characteristic is not writable")
+        }
+    }
+
+    private func completeActiveWrites() {
+        guard let activeCommand, !activeCommand.proxyWriteCompleted else {
+            return
+        }
+        activeCommand.proxyWriteCompleted = true
+        if activeCommand.finishAfterTelinkStatus {
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + activeCommand.settleAfterWrite) { [weak self, weak activeCommand] in
+            guard let self, let activeCommand, self.activeCommand === activeCommand else { return }
+            self.finishActive(ok: true, error: nil)
+        }
+    }
+
+    private func finishActive(ok: Bool, error: String?) {
+        guard let command = activeCommand else {
+            return
+        }
+        command.timeoutWorkItem?.cancel()
+        activeCommand = nil
+        let elapsed = Date().timeIntervalSince(command.startedAt)
+        var data: [String: Any] = [
+            "central_state": centralState,
+            "daemon": daemonSummary(),
+            "elapsed_seconds": Double(round(elapsed * 1000) / 1000),
+            "connected": selectedPeripheral?.state == .connected,
+            "proxy_write": [
+                "attempted": command.proxyWriteStarted,
+                "completed": command.proxyWriteCompleted,
+                "pdu_label": command.action == "status" ? "telink-0x26-status" : "telink-0x26-control",
+                "bytes": command.proxyWritePdus.reduce(0) { $0 + $1.count },
+                "logical_pdu_count": command.proxyWriteLogicalPduCount == 0 ? command.proxyPdus.count : command.proxyWriteLogicalPduCount,
+                "logical_bytes": command.proxyWriteLogicalBytes == 0 ? command.proxyPdus.reduce(0) { $0 + $1.count } : command.proxyWriteLogicalBytes,
+                "characteristic": cbuuidString(meshProxyDataIn),
+                "max_write_length": command.proxyWriteMaxLength,
+                "proxy_sar_segmented": command.proxyWritePdus.count != command.proxyPdus.count,
+                "segment_count": command.proxyWritePdus.count,
+                "segment_lengths": command.proxyWriteSegmentLengths.isEmpty ? command.proxyWritePdus.map(\.count) : command.proxyWriteSegmentLengths,
+                "segments_written": command.proxyWriteSegmentsWrittenTotal,
+                "write_type": command.proxyWriteType,
+                "notification_count": command.notificationLengths.count,
+                "notification_lengths": command.notificationLengths,
+            ],
+            "native_send": command.nativeSendMetadata,
+        ]
+        if !command.decodedNotifications.isEmpty {
+            data["proxy_notifications"] = command.decodedNotifications
+        }
+        var payload: [String: Any] = ["ok": ok, "data": data]
+        if let error {
+            payload["error"] = error
+        }
+        sendPayload(payload, connection: command.connection)
+        processQueue()
+    }
+
+    private func proxyNetworkMatches(advertisementData: [String: Any], networkId: [UInt8]) -> Bool {
+        let serviceData = advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data] ?? [:]
+        guard let proxyData = serviceData[meshProxyService] else {
+            return false
+        }
+        let bytes = Array(proxyData)
+        return bytes.count == 9 && bytes[0] == 0x00 && Array(bytes[1...]) == networkId
+    }
+
+    private func decodeRuntimeProxyNotification(_ proxyPdu: [UInt8], material: NativeDecodeMaterial) -> [String: Any] {
+        guard !proxyPdu.isEmpty else {
+            return ["length": 0, "decode_error": "empty Proxy PDU"]
+        }
+        let sar = (proxyPdu[0] & 0xc0) >> 6
+        let messageType = proxyPdu[0] & 0x3f
+        var result: [String: Any] = [
+            "length": proxyPdu.count,
+            "sar": sar,
+            "type": messageType == 0x00 ? "network" : (messageType == 0x01 ? "meshBeacon" : "unknown"),
+        ]
+        guard messageType == 0x00 else {
+            return result
+        }
+        do {
+            let decodedNetwork = try NativeMeshCrypto.decodeNetworkPdu(
+                networkPdu: Array(proxyPdu.dropFirst()),
+                ivIndex: material.ivIndex,
+                nid: material.networkKeys.nid,
+                encryptionKey: material.networkKeys.encryptionKey,
+                privacyKey: material.networkKeys.privacyKey
+            )
+            result["network"] = [
+                "ctl": decodedNetwork.ctl,
+                "ttl": decodedNetwork.ttl,
+                "sequence": decodedNetwork.sequence,
+                "source": decodedNetwork.source,
+                "destination": decodedNetwork.destination,
+                "transport_bytes": decodedNetwork.transportPdu.count,
+            ]
+            guard decodedNetwork.ctl == 0 else {
+                return result
+            }
+            guard let first = decodedNetwork.transportPdu.first, (first & 0x80) == 0 else {
+                result["lower_transport"] = ["segmented": true]
+                return result
+            }
+            let lower = try NativeMeshCrypto.decodeLowerTransportUnsegmentedAccessPdu(
+                lowerTransportPdu: decodedNetwork.transportPdu
+            )
+            result["lower_transport"] = [
+                "segmented": false,
+                "akf": lower.akf,
+                "aid": lower.aid,
+                "upper_transport_bytes": lower.upperTransportPdu.count,
+            ]
+            guard lower.akf && lower.aid == material.appAid else {
+                return result
+            }
+            let upper = try NativeMeshCrypto.decodeUpperTransportAccessPdu(
+                applicationKey: material.appKey,
+                sequence: decodedNetwork.sequence,
+                source: decodedNetwork.source,
+                destination: decodedNetwork.destination,
+                ivIndex: material.ivIndex,
+                upperTransportPdu: lower.upperTransportPdu,
+                transMicLength: 4
+            )
+            result["access"] = runtimeAccessMessageSummary(upper.accessMessage)
+        } catch {
+            result["decode_error"] = String(describing: error)
+        }
+        return result
+    }
+
+    private func runtimeAccessMessageSummary(_ accessMessage: [UInt8]) -> [String: Any] {
+        guard let opcodeLength = runtimeAccessOpcodeLength(accessMessage) else {
+            return ["decode_error": "invalid access opcode", "bytes": accessMessage.count]
+        }
+        let opcode = Array(accessMessage.prefix(opcodeLength))
+        var result: [String: Any] = [
+            "opcode": NativeMeshCrypto.hex(opcode),
+            "opcode_type": opcodeLength == 3 ? "vendor" : "sig",
+            "parameters_bytes": max(0, accessMessage.count - opcodeLength),
+        ]
+        if opcodeLength == 1 && opcode[0] == NativeTelinkControl.accessOpcode {
+            let parameters = Array(accessMessage.dropFirst())
+            if let telink = NativeTelinkControl.decodePacket(parameters) {
+                result["telink"] = telink
+            }
+        }
+        return result
+    }
+
+    private func runtimeAccessOpcodeLength(_ accessMessage: [UInt8]) -> Int? {
+        guard let first = accessMessage.first else {
+            return nil
+        }
+        let length: Int
+        if (first & 0x80) == 0 {
+            length = 1
+        } else if (first & 0xc0) == 0x80 {
+            length = 2
+        } else {
+            length = 3
+        }
+        return accessMessage.count >= length ? length : nil
+    }
+
+    private func isTelinkCCTStatus(_ decoded: [String: Any]) -> Bool {
+        guard let access = decoded["access"] as? [String: Any],
+              let telink = access["telink"] as? [String: Any] else {
+            return false
+        }
+        return telink["cct"] != nil
+    }
+
+    private func daemonSummary() -> [String: Any] {
+        [
+            "pid": Int(getpid()),
+            "port_file": options.portFile,
+            "selected_peripheral_id": selectedPeripheral?.identifier.uuidString ?? NSNull(),
+        ]
+    }
+
+    private func sendError(_ error: String, connection: NWConnection) {
+        sendPayload([
+            "ok": false,
+            "error": error,
+            "data": [
+                "central_state": centralState,
+                "daemon": daemonSummary(),
+            ],
+        ], connection: connection)
+    }
+
+    private func sendPayload(_ payload: [String: Any], connection: NWConnection) {
+        do {
+            var data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+            data.append(0x0a)
+            connection.send(content: data, completion: .contentProcessed { _ in
+                connection.cancel()
+            })
+        } catch {
+            connection.cancel()
+        }
     }
 }
 
@@ -3997,6 +4733,19 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
 @main
 struct BluetoothProbeMain {
     static func main() {
+        if CommandLine.arguments.contains("--daemon") {
+            do {
+                let daemon = try MeshRuntimeDaemon(options: RuntimeDaemonOptions(arguments: CommandLine.arguments))
+                daemon.start()
+                withExtendedLifetime(daemon) {
+                    CFRunLoopRun()
+                }
+            } catch {
+                fputs("failed to start daemon: \(error)\n", stderr)
+            }
+            return
+        }
+
         let options = ProbeOptions(arguments: CommandLine.arguments)
         if let configurationError = options.configurationError {
             let payload: [String: Any] = [
