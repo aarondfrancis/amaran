@@ -185,6 +185,7 @@ Scenes live in the same local state file:
 ./bin/amaran scene show "recording scene"
 ./bin/amaran scene apply "recording scene"
 ./bin/amaran scene apply "recording scene" --node <address-from-list>
+./bin/amaran scene delete "recording scene"
 ```
 
 `scene capture` reads live fixture status and stores intensity, CCT, green-
@@ -193,9 +194,10 @@ magenta correction when the fixture family supports it, and sleep state. Repeat
 save a fixture as off without requiring a status response, which is useful when
 an intentionally off fixture would otherwise time out. `scene apply` wakes each
 saved-on fixture first, then sends the saved look; saved-off fixtures receive
-`off`. Scene restore is capability-aware, so known `400M5-*` fixtures are
-clamped to `2700-6500K` and do not receive G/M commands. Both commands use the
-mesh keys in local state, but command output remains redacted.
+`off`. `scene delete` removes only the named local scene. Scene restore is
+capability-aware, so known `400M5-*` fixtures are clamped to `2700-6500K` and do
+not receive G/M commands. Both commands use the mesh keys in local state, but
+command output remains redacted.
 
 ## Terminal UI
 
@@ -210,8 +212,9 @@ brightness, CCT, and green-magenta correction, identifies a selected fixture,
 and applies or captures scenes. Scene capture is explicit: mark fixtures in the
 `cap` column to include them. If an included fixture is currently shown as off,
 the TUI saves it with `--off-node`; otherwise it reads live status. Scene rows
-apply on activation. The TUI uses the safe fixture capabilities exposed by
-`list --json`: for example, `400M5-*` fixtures show a `2700-6500K` CCT slider
+apply on activation. The `del` column opens a confirmation modal before
+removing a saved local scene. The TUI uses the safe fixture capabilities exposed
+by `list --json`: for example, `400M5-*` fixtures show a `2700-6500K` CCT slider
 and mark G/M as unsupported instead of sending no-op G/M packets. The TUI talks
 to the existing CLI commands and only consumes redacted JSON output; it does not
 read or display mesh, app, or device keys.
@@ -392,6 +395,7 @@ State and pairing commands manage local state and fixture setup.
 | `./bin/amaran scene apply <name> [--node <id-or-name>]... [--json]` | Apply a saved scene through direct runtime commands. With `--node`, apply only matching fixture entries. |
 | `./bin/amaran scene list [--json]` | List saved scenes without launching BLE. |
 | `./bin/amaran scene show <name> [--json]` | Show one saved scene without launching BLE. |
+| `./bin/amaran scene delete <name> [--json]` | Delete one saved local scene without launching BLE. |
 
 Diagnostic commands are lower-level tools for discovery, provisioning, control
 packet testing, and Config Client work.

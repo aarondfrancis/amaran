@@ -378,6 +378,23 @@ def cmd_show(args):
         print("\t".join(parts))
 
 
+def cmd_delete(args):
+    state_path = Path(args.state_path).expanduser().resolve()
+    payload = load_state(state_path)
+    scenes = scene_map(payload)
+    scene = scenes.get(args.name)
+    if not isinstance(scene, dict):
+        fail(f"scene not found: {args.name}")
+    output = scene_summary(args.name, scene)
+    del scenes[args.name]
+    write_state(state_path, payload)
+    output["deleted"] = True
+    if args.json:
+        print(json.dumps(output, indent=2))
+    else:
+        print(f"deleted scene {args.name!r}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Capture and apply named amaran scenes")
     parser.add_argument("--root", required=True)
@@ -402,6 +419,10 @@ def main():
     show = sub.add_parser("show")
     show.add_argument("name")
     show.set_defaults(func=cmd_show)
+
+    delete = sub.add_parser("delete")
+    delete.add_argument("name")
+    delete.set_defaults(func=cmd_delete)
 
     args = parser.parse_args()
     args.func(args)

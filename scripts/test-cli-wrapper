@@ -51,6 +51,7 @@ assert_contains "$HELP_OUTPUT" "amaran discover --range <start-end" "help discov
 assert_contains "$HELP_OUTPUT" "amaran fixture rename <node> <friendly-name> [--json]" "help fixture rename usage"
 assert_contains "$HELP_OUTPUT" "amaran scene capture <name> [--node <id|name>]" "help scene capture usage"
 assert_contains "$HELP_OUTPUT" "amaran scene apply <name> [--node <id|name>]" "help scene apply usage"
+assert_contains "$HELP_OUTPUT" "amaran scene delete <name> [--json]" "help scene delete usage"
 assert_contains "$HELP_OUTPUT" "amaran daemon [start|status|stop]" "help daemon usage"
 assert_contains "$HELP_OUTPUT" "amaran ui" "help ui usage"
 assert_contains "$HELP_OUTPUT" "amaran monitor [--node <id|name>]" "help monitor usage"
@@ -406,6 +407,13 @@ SCENE_SHOW_JSON_OUTPUT="$("$ROOT/bin/amaran" scene show "recording scene" --json
 assert_contains "$SCENE_SHOW_JSON_OUTPUT" '"fixture_count": 1' "scene show json"
 LEGACY_SCENE_SHOW_OUTPUT="$("$ROOT/bin/amaran" scene show "legacy scene" --state-path "$SIDUS_IMPORTED_STATE")"
 assert_contains "$LEGACY_SCENE_SHOW_OUTPUT" "5600K" "scene show legacy raw CCT normalization"
+SCENE_DELETE_JSON_OUTPUT="$("$ROOT/bin/amaran" scene delete "legacy scene" --json --state-path "$SIDUS_IMPORTED_STATE")"
+assert_contains "$SCENE_DELETE_JSON_OUTPUT" '"deleted": true' "scene delete json"
+SCENE_DELETE_MISSING_OUTPUT="$TMPDIR/scene-delete-missing.out"
+if "$ROOT/bin/amaran" scene show "legacy scene" --state-path "$SIDUS_IMPORTED_STATE" >"$SCENE_DELETE_MISSING_OUTPUT" 2>&1; then
+  fail "scene delete should remove the named scene"
+fi
+assert_contains "$(cat "$SCENE_DELETE_MISSING_OUTPUT")" "scene not found" "scene delete removes scene"
 
 SCENE_MULTI_STATE="$TMPDIR/scene-multi-state.json"
 python3 - "$SIDUS_IMPORTED_STATE" "$SCENE_MULTI_STATE" <<'PY'

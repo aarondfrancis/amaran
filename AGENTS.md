@@ -71,6 +71,8 @@ Useful commands:
 - `./bin/amaran scene list --json`
 - `./bin/amaran scene show <name>`
 - `./bin/amaran scene show <name> --json`
+- `./bin/amaran scene delete <name>`
+- `./bin/amaran scene delete <name> --json`
 - `./bin/amaran daemon [start|status|stop]`
 - `./bin/amaran daemon [start|status|stop] --json`
 - `./bin/amaran ui`
@@ -204,7 +206,8 @@ Implementation notes:
   saved intensity/CCT/green-magenta command so programmatically off fixtures
   wake before restore. For saved-off entries, it sends only `off`. With
   `--node`, it applies only matching fixture entries. `scene list` and
-  `scene show` are offline reads. Scene commands must not print
+  `scene show` are offline reads. `scene delete` removes only the named saved
+  local scene and must not launch BLE. Scene commands must not print
   mesh/app/device keys.
 - Fixture capabilities are safe metadata and may be inferred from source model
   names when local state does not contain explicit capabilities. Known

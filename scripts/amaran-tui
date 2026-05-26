@@ -109,6 +109,7 @@ from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Log, Static
 
 
@@ -168,13 +169,17 @@ class SceneView:
 SCENE_NAME_WIDTH = 14
 SCENE_FIXTURE_WIDTH = 9
 SCENE_CAPTURED_WIDTH = 19
+SCENE_DELETE_WIDTH = 5
+SCENE_DELETE_START = 1 + SCENE_NAME_WIDTH + SCENE_FIXTURE_WIDTH + SCENE_CAPTURED_WIDTH
 
 
 def scene_row_text(name, fixture_count, captured, selected=False):
+    delete_label = "del" if name == "scene" else "[x]"
     line = (
         f" {name:<{SCENE_NAME_WIDTH}}"
         f"{str(fixture_count):<{SCENE_FIXTURE_WIDTH}}"
         f"{captured:<{SCENE_CAPTURED_WIDTH}}"
+        f"{delete_label:>{SCENE_DELETE_WIDTH}}"
     )
     text = Text(line.rstrip())
     if selected:
@@ -230,8 +235,12 @@ class SceneList(Static):
         if 0 <= row < len(self.scenes):
             self.selected_index = row
             self.render_scenes()
+            scene = self.scenes[row]
             app = self.app
-            if hasattr(app, "schedule") and hasattr(app, "action_apply_scene"):
+            if int(getattr(event, "x", 0)) >= SCENE_DELETE_START:
+                if hasattr(app, "schedule") and hasattr(app, "action_delete_scene"):
+                    app.schedule(app.action_delete_scene(scene.name))
+            elif hasattr(app, "schedule") and hasattr(app, "action_apply_scene"):
                 app.schedule(app.action_apply_scene())
             event.stop()
 
@@ -246,6 +255,11 @@ class SceneList(Static):
             app = self.app
             if hasattr(app, "schedule") and hasattr(app, "action_apply_scene"):
                 app.schedule(app.action_apply_scene())
+            event.stop()
+        elif event.key in ("delete", "backspace", "d"):
+            app = self.app
+            if hasattr(app, "schedule") and hasattr(app, "action_delete_scene"):
+                app.schedule(app.action_delete_scene())
             event.stop()
 
 
@@ -527,6 +541,65 @@ class CompactButton(Static):
     def on_key(self, event):
         if event.key in ("enter", "space"):
             self.activate()
+            event.stop()
+
+
+class DeleteSceneModal(ModalScreen):
+    CSS = """
+    DeleteSceneModal {
+        align: center middle;
+    }
+
+    #delete-dialog {
+        width: 56;
+        height: 9;
+        border: solid $error;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #delete-title {
+        height: 1;
+        text-style: bold;
+    }
+
+    #delete-message {
+        height: 2;
+    }
+
+    #delete-actions {
+        height: 3;
+        padding: 1 0 0 0;
+    }
+
+    #delete-confirm,
+    #delete-cancel {
+        width: 12;
+    }
+    """
+
+    def __init__(self, scene_name):
+        super().__init__()
+        self.scene_name = scene_name
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="delete-dialog"):
+            yield Static("Delete Scene", id="delete-title")
+            yield Static(f"Delete saved scene '{self.scene_name}'?", id="delete-message")
+            with Horizontal(id="delete-actions"):
+                yield Button("Delete", id="delete-confirm", variant="error")
+                yield Button("Cancel", id="delete-cancel")
+
+    @on(Button.Pressed)
+    def button_pressed(self, event):
+        if event.button.id == "delete-confirm":
+            self.dismiss(True)
+        else:
+            self.dismiss(False)
+
+    def on_key(self, event):
+        if event.key == "escape":
+            self.dismiss(False)
             event.stop()
 
 
@@ -1363,6 +1436,22 @@ class AmaranTui(App):
             self.update_selected_panel()
         except CommandError as exc:
             self.append_log(f"scene apply failed: {exc.message}")
+
+    async def action_delete_scene(self, scene=None):
+        scene = scene or self.current_scene()
+        if not scene:
+            self.append_log("no scene selected")
+            return
+        confirmed = await self.push_screen_wait(DeleteSceneModal(scene))
+        if not confirmed:
+            self.append_log(f"kept scene {scene}")
+            return
+        try:
+            await self.run_amaran("scene", "delete", scene)
+            self.append_log(f"deleted scene {scene}")
+            await self.load_scenes()
+        except CommandError as exc:
+            self.append_log(f"scene delete failed: {exc.message}")
 
     async def action_capture_scene(self):
         await self.capture_scene()

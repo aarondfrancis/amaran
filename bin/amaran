@@ -49,6 +49,7 @@ Usage:
   amaran scene apply <name> [--node <id|name>] [--json]
   amaran scene list [--json]
   amaran scene show <name> [--json]
+  amaran scene delete <name> [--json]
   amaran daemon [start|status|stop] [--json]
   amaran ui
   amaran monitor [--node <id|name>] [--timeout <sec>] [--json]
@@ -1745,14 +1746,14 @@ run_scene_command() {
     echo "amaran: scene requires local state at $STATE_PATH" >&2
     return 1
   fi
-  [[ ${#POSITIONALS[@]} -ge 1 ]] || { echo "amaran: scene requires capture, apply, list, or show" >&2; exit 1; }
+  [[ ${#POSITIONALS[@]} -ge 1 ]] || { echo "amaran: scene requires capture, apply, list, show, or delete" >&2; exit 1; }
 
   local action="$POSITIONALS[1]"
   case "$action" in
-    capture|apply|list|show)
+    capture|apply|list|show|delete)
       ;;
     *)
-      echo "amaran: scene requires capture, apply, list, or show" >&2
+      echo "amaran: scene requires capture, apply, list, show, or delete" >&2
       exit 1
       ;;
   esac
