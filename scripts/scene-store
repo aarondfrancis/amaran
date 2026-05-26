@@ -114,6 +114,9 @@ def control(root, state_path, timeout, entry):
                 "--timeout",
                 str(timeout),
             ]
+            gm = entry.get("gm")
+            if gm is not None:
+                command.extend(["--gm", str(int(gm))])
         elif intensity is not None:
             command = [
                 str(Path(root) / "bin" / "amaran"),
@@ -143,6 +146,7 @@ def normalize_status(fixture, status):
         "mac_suffix": mac_suffix(fixture.get("mac_address")),
         "intensity": intensity,
         "cct": cct_kelvin,
+        "gm": cct.get("gm"),
         "sleep_mode": cct.get("sleep_mode"),
     }
 
@@ -299,6 +303,8 @@ def cmd_show(args):
         cct_kelvin = normalize_cct_kelvin(fixture.get("cct"))
         if cct_kelvin is not None:
             parts.append(f"{cct_kelvin:g}K")
+        if fixture.get("gm") is not None:
+            parts.append(f"gm {fixture['gm']}")
         print("\t".join(parts))
 
 

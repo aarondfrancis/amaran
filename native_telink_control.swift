@@ -18,6 +18,7 @@ enum NativeTelinkControlCommand {
     case onOff(Bool)
     case brightness(percent: String)
     case cct(kelvin: String, intensityPercent: String, gm: Int, gmFlag: Int)
+    case raw(packetHex: String, packet: [UInt8])
     case status
 
     static func parse(spec: String) throws -> NativeTelinkControlCommand {
@@ -47,6 +48,14 @@ enum NativeTelinkControlCommand {
                 throw NativeTelinkControlError.invalidCommand(spec)
             }
             return .cct(kelvin: parts[1], intensityPercent: parts[2], gm: gm, gmFlag: gmFlag)
+        case "raw":
+            guard parts.count == 2 else {
+                throw NativeTelinkControlError.invalidCommand(spec)
+            }
+            return .raw(
+                packetHex: parts[1],
+                packet: try NativeTelinkControl.rawPacket(hex: parts[1])
+            )
         case "status":
             guard parts.count == 1 else {
                 throw NativeTelinkControlError.invalidCommand(spec)
@@ -95,6 +104,18 @@ enum NativeTelinkControlCommand {
                 "packet_type": "cct",
                 "packet_bytes": 10,
             ]
+        case .raw(let packetHex, let packet):
+            let telink = NativeTelinkControl.decodePacket(packet) ?? [:]
+            return [
+                "control_command": "raw",
+                "opcode": "Telink 0x26",
+                "packet_type": "raw",
+                "packet_bytes": 10,
+                "packet_hex": NativeMeshCrypto.hex(packet),
+                "requested_packet_hex": packetHex,
+                "command_type": telink["command_type"] ?? NSNull(),
+                "opera_type": telink["opera_type"] ?? NSNull(),
+            ]
         case .status:
             return [
                 "control_command": "status",
@@ -120,6 +141,8 @@ enum NativeTelinkControlCommand {
                 gm: gm,
                 gmFlag: gmFlag
             )
+        case .raw(_, let packet):
+            return packet
         case .status:
             return NativeTelinkControl.statusRequestPacket()
         }
@@ -205,6 +228,16 @@ struct NativeTelinkControl {
                 "sleep_mode": Int((low64 >> 8) & 0x01),
             ]
         }
+        if commandType == 0x0a {
+            result["color"] = [
+                "hue_candidate": Int(packet[3]),
+                "saturation_candidate": Int(packet[4]),
+                "value_candidate": Int(packet[5]),
+                "mode_candidate": Int(packet[7]),
+                "aux_candidate": Int(packet[8]),
+                "packet_hex": NativeMeshCrypto.hex(packet),
+            ]
+        }
 
         return result
     }
@@ -215,9 +248,6 @@ struct NativeTelinkControl {
         }
         guard (0...1000).contains(telinkIntensity) else {
             throw NativeTelinkControlError.invalidParameter("intensity must be between 0 and 1000")
-        }
-        guard (0...255).contains(gm) else {
-            throw NativeTelinkControlError.invalidParameter("gm must be between 0 and 255")
         }
         guard gmFlag == 0 || gmFlag == 1 else {
             throw NativeTelinkControlError.invalidParameter("gm_flag must be 0 or 1")
@@ -235,6 +265,9 @@ struct NativeTelinkControl {
 
         low64 |= UInt64(gmFlag & 0x01) << 43
         if gmFlag == 1 {
+            guard (0...255).contains(gm) else {
+                throw NativeTelinkControlError.invalidParameter("gm must be between 0 and 255")
+            }
             if gm < 101 {
                 high16 |= UInt16((gm >> 19) & 0xff)
                 low64 |= UInt64(gm) << 45
@@ -243,10 +276,25 @@ struct NativeTelinkControl {
                 low64 |= 0x0000_1000_0000_0000
             }
         } else {
-            low64 |= UInt64((gm / 10) & 0x7f) << 45
+            guard (0...127).contains(gm) else {
+                throw NativeTelinkControlError.invalidParameter("gm must be between 0 and 127 when gm_flag is 0")
+            }
+            low64 |= UInt64(gm & 0x7f) << 45
         }
 
         return packetData(low64: low64, high16: high16)
+    }
+
+    static func rawPacket(hex: String) throws -> [UInt8] {
+        let packet = try NativeMeshCrypto.bytes(hex: hex)
+        guard packet.count == 10 else {
+            throw NativeTelinkControlError.invalidParameter("raw Telink packet must be exactly 10 bytes")
+        }
+        guard let decoded = decodePacket(packet),
+              decoded["checksum_valid"] as? Bool == true else {
+            throw NativeTelinkControlError.invalidParameter("raw Telink packet checksum is invalid")
+        }
+        return packet
     }
 
     private static func packetData(low64: UInt64, high16: UInt16) -> [UInt8] {

@@ -301,6 +301,87 @@ func prepareNativeProxyStateProbe(
     return (try NativeMeshCrypto.k3(n: netKey), metadata)
 }
 
+func prepareNativeMeshMonitor(
+    statePath: String,
+    nodeID: String?
+) throws -> (requiredProxyNetworkId: [UInt8], decodeMaterial: NativeDecodeMaterial, metadata: [String: Any], filterProxyPdu: [UInt8]) {
+    let url = URL(fileURLWithPath: statePath)
+    let data = try Data(contentsOf: url)
+    guard var payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        throw BluetoothProbeError.invalidState("state file must contain a JSON object")
+    }
+    guard jsonInt(payload["schema_version"]) == 1 else {
+        throw BluetoothProbeError.invalidState("unsupported state schema version")
+    }
+    guard let mesh = payload["mesh"] as? [String: Any] else {
+        throw BluetoothProbeError.invalidState("state file is missing mesh data")
+    }
+    guard let fixtures = payload["fixtures"] as? [[String: Any]], !fixtures.isEmpty else {
+        throw BluetoothProbeError.invalidState("state file is missing fixtures")
+    }
+    guard let netKeyHex = jsonString(mesh["net_key"]),
+          let appKeyHex = jsonString(mesh["app_key"]) else {
+        throw BluetoothProbeError.invalidState("state mesh data missing keys")
+    }
+    var runtime = payload["runtime"] as? [String: Any] ?? [:]
+    let ivIndex = jsonInt(runtime["iv_index"]) ?? 0
+
+    let fixture = try selectFixture(fixtures, nodeID: nodeID)
+    guard let destination = jsonInt(fixture["node_address"]), (1...0x7fff).contains(destination) else {
+        throw BluetoothProbeError.invalidState("fixture has invalid node address")
+    }
+    let sourceAddress = try nativeRuntimeSourceAddress(
+        runtime: runtime,
+        fixtures: fixtures,
+        destination: destination
+    )
+    let sequenceNext = jsonInt(runtime["sequence_next"]) ?? 1
+    guard (0...0x00ff_fffe).contains(sequenceNext) else {
+        throw BluetoothProbeError.invalidState("runtime sequence_next is exhausted or invalid")
+    }
+
+    let netKey = try NativeMeshCrypto.bytes(hex: netKeyHex)
+    let appKey = try NativeMeshCrypto.bytes(hex: appKeyHex)
+    let filterPdu = try NativeMeshCrypto.proxyConfigurationProxyPdu(
+        ivIndex: UInt32(ivIndex),
+        sequence: UInt32(sequenceNext),
+        source: UInt16(sourceAddress),
+        netKey: netKey,
+        transportPdu: [0x00, 0x01]
+    )
+    runtime["iv_index"] = ivIndex
+    runtime["source_address"] = sourceAddress
+    runtime["sequence_next"] = sequenceNext + 1
+    runtime["updated_at"] = isoTimestamp()
+    runtime["last_reserved_by"] = "monitor-proxy-filter"
+    payload["runtime"] = runtime
+
+    let updated = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+    try updated.write(to: url, options: .atomic)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: statePath)
+
+    let metadata: [String: Any] = [
+        "address": destination,
+        "fixture": fixtureLabel(fixture),
+        "monitor": "mesh_proxy",
+        "proxy_filter": "reject_list_empty",
+        "proxy_filter_sequence": sequenceNext,
+        "proxy_filter_source": sourceAddress,
+    ]
+    return (
+        try NativeMeshCrypto.k3(n: netKey),
+        NativeDecodeMaterial(
+            networkKeys: try NativeMeshCrypto.k2(n: netKey, p: [0x00]),
+            appKey: appKey,
+            appAid: try NativeMeshCrypto.k4(n: appKey),
+            deviceKey: nil,
+            ivIndex: UInt32(ivIndex)
+        ),
+        metadata,
+        filterPdu.proxyPdu
+    )
+}
+
 func occupiedFixtureAddresses(_ fixtures: [[String: Any]]) -> Set<Int> {
     var occupied = Set<Int>()
     for fixture in fixtures {
@@ -1383,6 +1464,11 @@ final class ProbeOptions {
     var segmentAckRetryDelay: TimeInterval = 0.75
     var finishAfterTelinkStatus = false
     var storeConfigCompositionData = false
+    var monitorDuration: TimeInterval?
+    var monitorStarted = false
+    var monitorFilterProxyPdu: [UInt8]?
+    var monitorFilterWritten = false
+    var includeRawAccess = false
     var confirmReset = false
     var advertisementCapturePath: String?
     var discoverAllServices = false
@@ -1579,6 +1665,25 @@ final class ProbeOptions {
                 } else {
                     index += 1
                 }
+            case "--monitor":
+                do {
+                    let prepared = try prepareNativeMeshMonitor(
+                        statePath: statePath,
+                        nodeID: nodeID
+                    )
+                    requiredProxyNetworkId = prepared.requiredProxyNetworkId
+                    decodeMaterial = prepared.decodeMaterial
+                    nativeSendMetadata = prepared.metadata
+                    monitorFilterProxyPdu = prepared.filterProxyPdu
+                    scanServices = [meshProxyService]
+                    connectService = meshProxyService
+                    monitorDuration = timeout
+                    includeRawAccess = true
+                    connect = true
+                } catch {
+                    configurationError = String(describing: error)
+                }
+                index += 1
             case "--sig-onoff-test":
                 if index + 1 < arguments.count {
                     let value = arguments[index + 1].lowercased()
@@ -3169,6 +3274,8 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
         }
         if options.nativeProvisioningRun != nil {
             startLiveProvisioning(peripheral)
+        } else if options.monitorDuration != nil {
+            startMonitor(peripheral)
         } else {
             writeProxyPdus(peripheral)
         }
@@ -3307,6 +3414,8 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
         }
         if options.nativeProvisioningRun != nil {
             startLiveProvisioningIfReady(peripheral)
+        } else if options.monitorDuration != nil {
+            startMonitorIfReady(peripheral)
         } else if options.hasProxyWrite {
             startProxyWriteIfReady(peripheral)
         } else {
@@ -3458,6 +3567,48 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
             peripheral.setNotifyValue(true, for: out)
         } else {
             writeProxyPdus(peripheral)
+        }
+    }
+
+    private func startMonitorIfReady(_ peripheral: CBPeripheral) {
+        guard !options.monitorStarted else {
+            return
+        }
+        guard proxyDataInCharacteristic != nil else {
+            finish(ok: false, error: "\(writeDataInLabel()) characteristic \(cbuuidString(options.writeDataInUUID)) not found")
+            return
+        }
+        guard let out = proxyDataOutCharacteristic else {
+            finish(ok: false, error: "\(writeDataOutLabel()) characteristic \(cbuuidString(options.writeDataOutUUID)) not found")
+            return
+        }
+
+        if out.properties.contains(.notify) || out.properties.contains(.indicate) {
+            peripheral.setNotifyValue(true, for: out)
+        } else {
+            finish(ok: false, error: "\(writeDataOutLabel()) characteristic \(cbuuidString(options.writeDataOutUUID)) is not notifiable")
+        }
+    }
+
+    private func startMonitor(_ peripheral: CBPeripheral) {
+        guard !options.monitorStarted else {
+            return
+        }
+        if let filterProxyPdu = options.monitorFilterProxyPdu, !options.monitorFilterWritten {
+            guard let input = proxyDataInCharacteristic else {
+                finish(ok: false, error: "\(writeDataInLabel()) characteristic \(cbuuidString(options.writeDataInUUID)) not found")
+                return
+            }
+            guard input.properties.contains(.writeWithoutResponse) else {
+                finish(ok: false, error: "\(writeDataInLabel()) characteristic does not support writeWithoutResponse")
+                return
+            }
+            peripheral.writeValue(Data(filterProxyPdu), for: input, type: .withoutResponse)
+            options.monitorFilterWritten = true
+        }
+        options.monitorStarted = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + (options.monitorDuration ?? options.timeout)) { [weak self] in
+            self?.finish(ok: true, error: nil)
         }
     }
 
@@ -4340,11 +4491,16 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
             return ["decode_error": "invalid access opcode", "bytes": accessMessage.count]
         }
         let opcode = Array(accessMessage.prefix(opcodeLength))
+        let parameters = Array(accessMessage.dropFirst(opcodeLength))
         var result: [String: Any] = [
             "opcode": NativeMeshCrypto.hex(opcode),
             "opcode_type": opcodeLength == 3 ? "vendor" : "sig",
             "parameters_bytes": max(0, accessMessage.count - opcodeLength),
         ]
+        if options.includeRawAccess {
+            result["access_message_hex"] = NativeMeshCrypto.hex(accessMessage)
+            result["parameters_hex"] = NativeMeshCrypto.hex(parameters)
+        }
         if let config = configMessageSummary(accessMessage) {
             result["config"] = config
         }
@@ -4352,7 +4508,6 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
             result["vendor_opcode"] = opcode[0] & 0x3f
             result["company_id"] = String(format: "%04x", UInt16(opcode[1]) | (UInt16(opcode[2]) << 8))
         } else if opcodeLength == 1 && opcode[0] == NativeTelinkControl.accessOpcode {
-            let parameters = Array(accessMessage.dropFirst())
             if let telink = NativeTelinkControl.decodePacket(parameters) {
                 result["telink"] = telink
             }
@@ -4627,6 +4782,18 @@ final class MeshGattProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
                     "max_send_attempts": options.segmentAckMaxSendAttempts,
                 ]
             }
+            if !decodedNotifications.isEmpty {
+                data["proxy_notifications"] = decodedNotifications
+            }
+        }
+        if options.monitorDuration != nil {
+            data["monitor"] = [
+                "started": options.monitorStarted,
+                "duration": options.monitorDuration ?? options.timeout,
+                "proxy_filter_written": options.monitorFilterWritten,
+                "notification_count": notificationLengths.count,
+                "notification_lengths": notificationLengths,
+            ]
             if !decodedNotifications.isEmpty {
                 data["proxy_notifications"] = decodedNotifications
             }

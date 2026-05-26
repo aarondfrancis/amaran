@@ -55,6 +55,8 @@ that mesh metadata from an encrypted local iPad backup.
 ./bin/amaran intensity 25
 ./bin/amaran cct 5600
 ./bin/amaran cct 3200 --intensity 10
+./bin/amaran gm 10 --node tube-stage-left
+./bin/amaran cct 4700 --intensity 24 --gm 20 --node tube-stage-right
 ```
 
 Use `--node <id-or-name>` or `AMARAN_NODE_ID=<id-or-name>` if more than one
@@ -299,7 +301,8 @@ one-shot helper path if the daemon cannot be reached.
 | `./bin/amaran on [--node <id-or-name>]` | Send Telink vendor on. |
 | `./bin/amaran off [--node <id-or-name>]` | Send Telink vendor off. |
 | `./bin/amaran intensity <0-100> [--node <id-or-name>]` | Send Telink brightness in percent. |
-| `./bin/amaran cct <kelvin> [--intensity <0-100>] [--node <id-or-name>]` | Send Telink CCT. Without `--intensity`, the CLI reads status first and preserves the current intensity. |
+| `./bin/amaran cct <kelvin> [--intensity <0-100>] [--gm <0-20>] [--node <id-or-name>]` | Send Telink CCT. The CLI reads status to preserve any omitted intensity or green-magenta value. |
+| `./bin/amaran gm <0-20> [--node <id-or-name>]` | Send Sidus-style green-magenta correction while preserving current CCT and intensity. `10` is neutral, lower is greener, higher is more magenta. |
 | `./bin/amaran daemon [start\|status\|stop] [--json]` | Start, inspect, or stop the local runtime daemon without sending fixture control commands. Runtime commands auto-start it when needed. |
 
 State and pairing commands manage local state and fixture setup.
@@ -330,9 +333,10 @@ packet testing, and Config Client work.
 | `./bin/amaran provision-invite-test [--attention <0-255>] [--json]` | Send only Provisioning Invite and decode Capabilities. |
 | `./bin/amaran provision-test [--add] [--attention <0-255>] [--json]` | Run no-OOB PB-GATT provisioning and write or append state, without post-provision configuration. |
 | `./bin/amaran pair-test [--add] [--attention <0-255>] [--dry-run] [--verify] [--json]` | Diagnostic alias for provisioning plus post-provision configuration. |
+| `./bin/amaran monitor [--node <id-or-name>] [--timeout <sec>] [--json]` | Subscribe to Mesh Proxy notifications for reverse-engineering runtime packets. It writes a proxy reject-list filter first so application traffic is forwarded. JSON output may include raw access parameters, but not mesh keys. |
 | `./bin/amaran proxy-test [--json]` | Write a public sample Mesh Proxy PDU. |
 | `./bin/amaran sig-onoff-test <on\|off> [--node <id-or-name>] [--json]` | Send a standard Generic OnOff test PDU. The 60x S does not apply this to emitter output. |
-| `./bin/amaran control-test <on\|off\|intensity\|cct> [value] [--intensity <0-100>] [--node <id-or-name>] [--json]` | Send reconstructed Telink `0x26` control payloads. |
+| `./bin/amaran control-test <on\|off\|intensity\|cct\|raw> [value] [--intensity <0-100>] [--gm <0-20>] [--node <id-or-name>] [--json]` | Send reconstructed Telink `0x26` control payloads. `control-test cct` accepts `--gm`; `raw` accepts a checksummed 10-byte Telink packet hex for controlled reverse-engineering only. |
 | `./bin/amaran status-test [--node <id-or-name>] [--json]` | Read and decode Telink `0x26` status. |
 | `./bin/amaran configure-test [--node <id-or-name>] [--json]` | Fetch composition, ensure AppKey index 0, and bind the vendor model. |
 | `./bin/amaran config-composition-get-test [--node <id-or-name>] [--json]` | Fetch and store Composition Data Page 0. |
@@ -357,6 +361,7 @@ Global options:
 | `--replace` | For `sidus-import`, overwrite the target CLI state file. |
 | `--range <spec>` | Address range for `discover`, such as `2-32` or `2-8,12`. |
 | `--update-state` | For `discover`, keep newly responsive fixture entries in local state. |
+| `--gm <0-20>` | Green-magenta correction for CCT-capable fixtures. `10` is neutral, lower is greener, higher is more magenta. |
 | `--dry-run` | For `pair`, preflight and scan only. For node reset, validate and print the selected fixture without sending reset. |
 | `--verify` | For `pair`, read status after provisioning/configuration. |
 | `--confirm-reset` | Required for destructive Config Node Reset. |
@@ -386,7 +391,12 @@ Global options:
 - `native_mesh_provisioning.swift` contains PB-GATT provisioning helpers.
 - `native_mesh_state.swift` contains the local state payload builder.
 - `native_telink_control.swift` contains the reconstructed Telink `0x26` packet
-  builders for on/off, brightness, CCT control, and status reads.
+  builders for on/off, brightness, CCT/green-magenta control, and status reads.
+- Sidus Link Pro has been observed controlling tube green/magenta tint through
+  the same Telink CCT packet used for Kelvin/intensity, with GM values in the
+  `0..20` range. The CLI exposes this as `gm` and `cct --gm`. Tubes also return
+  Telink command type `0x0a` packets that look like hue/saturation status; those
+  fields remain diagnostic until an RGB setter is confirmed.
 
 ## Development
 

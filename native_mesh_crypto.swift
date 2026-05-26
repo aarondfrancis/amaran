@@ -411,6 +411,14 @@ struct NativeMeshCrypto {
             + uintBytes(UInt64(ivIndex), count: 4)
     }
 
+    static func proxyNonce(sequence: UInt32, source: UInt16, ivIndex: UInt32) -> [UInt8] {
+        [0x03, 0x00]
+            + uintBytes(sequence, count: 3)
+            + uintBytes(UInt64(source), count: 2)
+            + [0x00, 0x00]
+            + uintBytes(UInt64(ivIndex), count: 4)
+    }
+
     static func applicationNonce(
         aszmic: Bool = false,
         sequence: UInt32,
@@ -751,6 +759,60 @@ struct NativeMeshCrypto {
         destination: UInt16,
         transportPdu: [UInt8]
     ) throws -> NetworkPduResult {
+        try encryptedNetworkPdu(
+            ivIndex: ivIndex,
+            nid: nid,
+            encryptionKey: encryptionKey,
+            privacyKey: privacyKey,
+            ctl: ctl,
+            ttl: ttl,
+            sequence: sequence,
+            source: source,
+            destination: destination,
+            transportPdu: transportPdu,
+            nonce: networkNonce(ctl: ctl, ttl: ttl, sequence: sequence, source: source, ivIndex: ivIndex),
+            proxyMessageType: 0x00
+        )
+    }
+
+    static func proxyConfigurationProxyPdu(
+        ivIndex: UInt32,
+        sequence: UInt32,
+        source: UInt16,
+        netKey: [UInt8],
+        transportPdu: [UInt8]
+    ) throws -> NetworkPduResult {
+        let networkKeys = try k2(n: netKey, p: [0x00])
+        return try encryptedNetworkPdu(
+            ivIndex: ivIndex,
+            nid: networkKeys.nid,
+            encryptionKey: networkKeys.encryptionKey,
+            privacyKey: networkKeys.privacyKey,
+            ctl: 1,
+            ttl: 0,
+            sequence: sequence,
+            source: source,
+            destination: 0x0000,
+            transportPdu: transportPdu,
+            nonce: proxyNonce(sequence: sequence, source: source, ivIndex: ivIndex),
+            proxyMessageType: 0x02
+        )
+    }
+
+    private static func encryptedNetworkPdu(
+        ivIndex: UInt32,
+        nid: UInt8,
+        encryptionKey: [UInt8],
+        privacyKey: [UInt8],
+        ctl: UInt8,
+        ttl: UInt8,
+        sequence: UInt32,
+        source: UInt16,
+        destination: UInt16,
+        transportPdu: [UInt8],
+        nonce: [UInt8],
+        proxyMessageType: UInt8
+    ) throws -> NetworkPduResult {
         guard nid <= 0x7f else {
             throw NativeMeshCryptoError.invalidParameter("NID must be a 7-bit value")
         }
@@ -766,8 +828,10 @@ struct NativeMeshCrypto {
         guard !transportPdu.isEmpty else {
             throw NativeMeshCryptoError.invalidParameter("transport PDU must not be empty")
         }
+        guard proxyMessageType <= 0x3f else {
+            throw NativeMeshCryptoError.invalidParameter("Proxy PDU message type must be a 6-bit value")
+        }
 
-        let nonce = networkNonce(ctl: ctl, ttl: ttl, sequence: sequence, source: source, ivIndex: ivIndex)
         let plaintext = uintBytes(UInt64(destination), count: 2) + transportPdu
         let micLength = ctl == 0 ? 4 : 8
         let networkEncryption = try aesCcmEncrypt(
@@ -787,7 +851,7 @@ struct NativeMeshCrypto {
         let obfuscated = xor(ctlTtlSeqSrc, pecb)
         let iviNid = UInt8((ivIndex & 0x01) == 0 ? 0 : 0x80) | (nid & 0x7f)
         let networkPdu = [iviNid] + obfuscated + networkEncryption.ciphertext + networkEncryption.mic
-        let proxyPdu = [0x00] + networkPdu
+        let proxyPdu = [proxyMessageType] + networkPdu
 
         return NetworkPduResult(
             nonce: nonce,

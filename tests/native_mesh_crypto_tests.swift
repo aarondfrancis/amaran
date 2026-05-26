@@ -266,14 +266,27 @@ struct NativeMeshCryptoTests {
         )
         try expectHex(
             try NativeTelinkControl.cctPacket(telinkCct: 560, telinkIntensity: 200, gm: 10, gmFlag: 0),
-            "f7000000002000233282",
+            "18000000004001233282",
             "Telink 0x26 CCT packet"
         )
         try expectHex(
+            try NativeTelinkControl.cctPacket(telinkCct: 470, telinkIntensity: 240, gm: 20, gmFlag: 0),
+            "bd0000000080621d3c82",
+            "Telink 0x26 Sidus green-magenta packet"
+        )
+        try expectHex(
             try NativeTelinkControlCommand.parse(spec: "cct:5600:20:10:0").accessMessage(),
-            "26f7000000002000233282",
+            "2618000000004001233282",
             "Telink 0x26 CCT access message"
         )
+        try expectHex(
+            try NativeTelinkControlCommand.parse(spec: "raw:18000000004001233282").accessMessage(),
+            "2618000000004001233282",
+            "Telink 0x26 raw access message"
+        )
+        expectThrows("Telink raw rejects bad checksum") {
+            _ = try NativeTelinkControl.rawPacket(hex: "00000000002000233282")
+        }
         try expectHex(
             NativeTelinkControl.statusRequestPacket(),
             "0e00000000000000000e",
@@ -295,6 +308,16 @@ struct NativeMeshCryptoTests {
         expectEqual(cctStatus?["cct_decoded"] as? Int, 560, "Telink status CCT")
         expectEqual(cctStatus?["gm_decoded"] as? Int, 10, "Telink status green-magenta")
         expectEqual(cctStatus?["sleep_mode"] as? Int, 1, "Telink status sleep mode")
+        let decodedColorStatus = NativeTelinkControl.decodePacket(
+            try NativeMeshCrypto.bytes(hex: "4b000078c8000001000a")
+        )
+        let colorStatus = decodedColorStatus?["color"] as? [String: Any]
+        expectEqual(decodedColorStatus?["check_sum"] as? Int, 75, "Telink color status checksum value")
+        expectEqual(decodedColorStatus?["checksum_valid"] as? Bool, true, "Telink color status checksum")
+        expectEqual(decodedColorStatus?["command_type"] as? Int, 10, "Telink color status command type")
+        expectEqual(colorStatus?["hue_candidate"] as? Int, 120, "Telink color status hue candidate")
+        expectEqual(colorStatus?["saturation_candidate"] as? Int, 200, "Telink color status saturation candidate")
+        expectEqual(colorStatus?["mode_candidate"] as? Int, 1, "Telink color status mode candidate")
         let provisioning = NativeMeshProvisioning.provisioningServiceDataSummary(
             try NativeMeshCrypto.bytes(hex: "00112233445566778899aabbccddeeff000212345678")
         )
@@ -999,6 +1022,24 @@ struct NativeMeshCryptoTests {
             upperTransportPdu: decodedLowerTransport.upperTransportPdu
         )
         try expectHex(decodedUpperTransport.accessMessage, "0400000000", "Mesh decoded access message")
+
+        let proxyConfiguration = try NativeMeshCrypto.proxyConfigurationProxyPdu(
+            ivIndex: 0x12345678,
+            sequence: 0x000001,
+            source: 0x0001,
+            netKey: try NativeMeshCrypto.bytes(hex: "d1aafb2a1a3c281cbdb0e960edfad852"),
+            transportPdu: [0x00, 0x00]
+        )
+        try expectHex(
+            proxyConfiguration.nonce,
+            "03000000010001000012345678",
+            "Mesh proxy configuration nonce"
+        )
+        try expectHex(
+            proxyConfiguration.proxyPdu,
+            "0210386bd60efbbb8b8c28512e792d3711f4b526",
+            "Mesh proxy configuration Set Filter Type vector"
+        )
 
         let identitySalt = try NativeMeshCrypto.s1("nkik")
         let identityKey = try NativeMeshCrypto.k1(

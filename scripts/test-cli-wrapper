@@ -52,6 +52,10 @@ assert_contains "$HELP_OUTPUT" "amaran fixture rename <node> <friendly-name> [--
 assert_contains "$HELP_OUTPUT" "amaran scene capture <name> [--node <id|name>]" "help scene capture usage"
 assert_contains "$HELP_OUTPUT" "amaran scene apply <name> [--node <id|name>]" "help scene apply usage"
 assert_contains "$HELP_OUTPUT" "amaran daemon [start|status|stop]" "help daemon usage"
+assert_contains "$HELP_OUTPUT" "amaran monitor [--node <id|name>]" "help monitor usage"
+assert_contains "$HELP_OUTPUT" "amaran gm <0-20> [--node <id|name>]" "help gm usage"
+assert_contains "$HELP_OUTPUT" "control-test <on|off|intensity|cct|raw>" "help control-test raw usage"
+assert_contains "$HELP_OUTPUT" "--gm <0-20>" "help gm option"
 assert_contains "$HELP_OUTPUT" "amaran identify [<id|name>] [--node <id|name>] [--json]" "help identify usage"
 assert_contains "$HELP_OUTPUT" "config-node-reset-test [--dry-run|--confirm-reset]" "help node reset usage"
 assert_contains "$HELP_OUTPUT" "--state-path <p>" "help state path option"
@@ -342,6 +346,7 @@ payload.setdefault("scenes", {})["recording scene"] = {
             "mac_suffix": "123C21",
             "intensity": 18,
             "cct": 5600,
+            "gm": 10,
             "sleep_mode": 1,
         }
     ],
@@ -355,6 +360,7 @@ payload.setdefault("scenes", {})["legacy scene"] = {
             "mac_suffix": "123C21",
             "intensity": 18,
             "cct": 560,
+            "gm": 10,
             "sleep_mode": 1,
         }
     ],
@@ -368,6 +374,7 @@ assert_contains "$SCENE_LIST_OUTPUT" "recording scene" "scene list"
 SCENE_SHOW_OUTPUT="$("$ROOT/bin/amaran" scene show "recording scene" --state-path "$SIDUS_IMPORTED_STATE")"
 assert_contains "$SCENE_SHOW_OUTPUT" "400M5-123C21" "scene show fixture"
 assert_contains "$SCENE_SHOW_OUTPUT" "5600K" "scene show cct"
+assert_contains "$SCENE_SHOW_OUTPUT" "gm 10" "scene show gm"
 SCENE_SHOW_JSON_OUTPUT="$("$ROOT/bin/amaran" scene show "recording scene" --json --state-path "$SIDUS_IMPORTED_STATE")"
 assert_contains "$SCENE_SHOW_JSON_OUTPUT" '"fixture_count": 1' "scene show json"
 LEGACY_SCENE_SHOW_OUTPUT="$("$ROOT/bin/amaran" scene show "legacy scene" --state-path "$SIDUS_IMPORTED_STATE")"

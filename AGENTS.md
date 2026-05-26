@@ -25,12 +25,14 @@ Useful commands:
 - `./bin/amaran provision-test [--add] [--attention <0-255>] --json`
 - `./bin/amaran pair-test [--add] [--attention <0-255>] [--dry-run] [--verify]`
 - `./bin/amaran pair-test [--add] [--attention <0-255>] [--dry-run] [--verify] --json`
+- `./bin/amaran monitor [--node <id|name>] [--timeout <sec>]`
+- `./bin/amaran monitor [--node <id|name>] [--timeout <sec>] --json`
 - `./bin/amaran proxy-test`
 - `./bin/amaran proxy-test --json`
 - `./bin/amaran sig-onoff-test <on|off>`
 - `./bin/amaran sig-onoff-test <on|off> --json`
-- `./bin/amaran control-test <on|off|intensity|cct> [value] [--intensity <0-100>]`
-- `./bin/amaran control-test <on|off|intensity|cct> [value] --json`
+- `./bin/amaran control-test <on|off|intensity|cct|raw> [value] [--intensity <0-100>] [--gm <0-20>]`
+- `./bin/amaran control-test <on|off|intensity|cct|raw> [value] --json`
 - `./bin/amaran status-test`
 - `./bin/amaran status-test --json`
 - `./bin/amaran configure-test`
@@ -79,7 +81,8 @@ Useful commands:
 - `./bin/amaran on`
 - `./bin/amaran off`
 - `./bin/amaran intensity <0-100>`
-- `./bin/amaran cct <kelvin> [--intensity <0-100>]`
+- `./bin/amaran cct <kelvin> [--intensity <0-100>] [--gm <0-20>]`
+- `./bin/amaran gm <0-20>`
 
 Implementation notes:
 
@@ -89,10 +92,10 @@ Implementation notes:
   Link Pro on the iPad, create an encrypted local iPad backup, run
   `./bin/amaran sidus-import --backup <path>`, then use direct CLI runtime
   commands and `scene` commands. This keeps the iPad as pairing source of truth.
-- `list`, `probe`, `status`, `identify`, `on`, `off`, `intensity`, and `cct` are direct
+- `list`, `probe`, `status`, `identify`, `on`, `off`, `intensity`, `cct`, and `gm` are direct
   runtime commands. They require local CLI state and must not silently fall back
   to third-party app databases or helper bundles.
-- `status`, `identify`, `on`, `off`, `intensity`, and `cct` should prefer the
+- `status`, `identify`, `on`, `off`, `intensity`, `cct`, and `gm` should prefer the
   auto-started local runtime daemon in `BluetoothProbe.app` when available.
   The daemon listens only on localhost, writes non-secret port metadata under
   `~/Library/Application Support/amaran-cli/daemon.json`, keeps CoreBluetooth
@@ -106,10 +109,10 @@ Implementation notes:
   `fixture clear-name <node>` removes only the local `friendly_name`.
 - `./bin/amaran identify [<id-or-name>]` reads vendor status, blinks the
   selected fixture three times, then restores the previous on/off, intensity,
-  and CCT state. It should use direct runtime commands, accept friendly names,
-  and avoid printing key material. After the initial status read, it should send
-  the blink/restore commands as one batched helper control sequence so it does
-  not repeatedly scan/connect for each flash step.
+  CCT, and green-magenta state. It should use direct runtime commands, accept
+  friendly names, and avoid printing key material. After the initial status
+  read, it should send the blink/restore commands as one batched helper control
+  sequence so it does not repeatedly scan/connect for each flash step.
 - `doctor` runs directly in the wrapper. It reports local state, safe runtime
   counters, and control readiness without launching BLE. It does not print key
   material.
@@ -198,8 +201,8 @@ Implementation notes:
 - CLI-provisioned state may not contain a real BLE MAC address because macOS
   CoreBluetooth does not expose it. The runtime does not need that MAC.
 - `probe` matches the advertised Mesh Proxy Network ID computed from local CLI
-  state. `cct` without `--intensity` performs a status read first so it can
-  preserve current intensity.
+  state. `cct` reads status to preserve any omitted intensity or GM value.
+  `gm` reads status first so it can preserve current CCT and intensity.
 - The state file contains mesh/app/device keys. Do not print, log in
   final answers, commit, or share that state file or any keys from it.
 - Safe output may include fixture counts, names, node addresses, model codes,
@@ -210,7 +213,12 @@ Implementation notes:
   packets can be transmitted, but the amaran 60x S does not apply them to the
   emitter output.
 - Telink brightness uses `0..1000` intensity units. Telink CCT uses Kelvin
-  divided by 10.
+  divided by 10. Color-capable tubes have been observed using the same Telink
+  CCT packet for Sidus-style green-magenta correction in the `0..20` range;
+  `10` is neutral, lower is greener, and higher is more magenta.
+- Telink command type `0x0a` has been observed on color-capable tubes as a
+  color-status-looking packet. The CLI decodes likely hue/saturation fields as
+  diagnostic candidates only; a stable RGB color setter is not confirmed yet.
 - `./bin/amaran status` reads the vendor `CCTPacket`, preferring the
   Mesh Proxy status query. After `off`, status may time out because the fixture
   can stop answering menu queries while asleep.
@@ -251,6 +259,11 @@ Development notes:
 - `./bin/amaran proxy-test` launches `BluetoothProbe.app`, subscribes to
   Mesh Proxy Data Out `0x2ADE`, and writes a public sample Proxy PDU to Mesh
   Proxy Data In `0x2ADD`. It does not use local mesh keys or control the light.
+- `./bin/amaran monitor` launches `BluetoothProbe.app`, subscribes to Mesh
+  Proxy Data Out `0x2ADE`, writes a Proxy Configuration Set Filter Type
+  message for an empty reject-list filter, and captures/decrypts forwarded
+  runtime traffic for packet reverse engineering. It may include raw access
+  parameters in JSON output, but must not print mesh/app/device keys.
 - `./bin/amaran sig-onoff-test <on|off>` launches `BluetoothProbe.app`,
   reads CLI state, reserves and persists the next sequence number,
   matches the advertised Mesh Proxy Network ID, and writes a locally-keyed
@@ -258,12 +271,16 @@ Development notes:
   60x S emitter output because standard SIG control is not the working vendor
   path. JSON output may include decoded source/destination/opcode metadata, but
   must not include keys or raw access parameters.
-- `./bin/amaran control-test <on|off|intensity|cct>` launches
+- `./bin/amaran control-test <on|off|intensity|cct|raw>` launches
   `BluetoothProbe.app`, reads CLI state, reserves and persists the next
   sequence number, and writes a locally-keyed Telink `0x26` control Proxy
-  PDU. The test command still requires `--intensity` for `cct`; the stable
-  `cct` command can preserve current intensity by reading status first.
-  JSON output must not include keys or raw access parameters.
+  PDU. The test command still requires `--intensity` for `cct`; it accepts
+  optional `--gm <0-20>`. The stable `cct` command can preserve current
+  intensity and GM by reading status first. `raw` accepts exactly one
+  checksummed 10-byte Telink packet hex and is for controlled fixture reverse
+  engineering only. JSON output must not include keys or raw access parameters
+  except for `monitor`, where raw access parameters are the requested
+  diagnostic output.
 - `./bin/amaran status-test` launches `BluetoothProbe.app`, reads CLI
   state, reserves and persists the next sequence number, sends the
   Telink `0x26` read-data request from the Telink runtime source address, and
@@ -359,6 +376,9 @@ Development notes:
   segmented send path and waits for the expected Segment Acknowledgment.
 - In Codex, `./bin/amaran` may need elevated execution because it launches a
   macOS app bundle. In a normal terminal it should run directly.
+- One-shot helper commands launch `BluetoothProbe.app` with `open -n -W` so
+  they do not attach to the long-lived daemon instance and silently ignore the
+  one-shot arguments.
 
 ## Solo Integration
 

@@ -15,6 +15,7 @@ ADD_FIXTURE=0
 JSON=0
 CONFIRM_RESET=0
 INTENSITY_OPT=""
+GM_OPT=""
 NATIVE_CONTROL_SPEC=""
 CAPTURE_STATE_PATH=""
 GATT_ALL_SERVICES=0
@@ -45,6 +46,7 @@ Usage:
   amaran scene list [--json]
   amaran scene show <name> [--json]
   amaran daemon [start|status|stop] [--json]
+  amaran monitor [--node <id|name>] [--timeout <sec>] [--json]
   amaran list [--json]
   amaran probe [--node <id|name>] [--json]
   amaran status [--node <id|name>] [--json]
@@ -52,7 +54,8 @@ Usage:
   amaran on [--node <id|name>]
   amaran off [--node <id|name>]
   amaran intensity <0-100> [--node <id|name>]
-  amaran cct <kelvin> [--intensity <0-100>] [--node <id|name>]
+  amaran cct <kelvin> [--intensity <0-100>] [--gm <0-20>] [--node <id|name>]
+  amaran gm <0-20> [--node <id|name>]
 
 Diagnostics:
   amaran gatt-probe [--all-services] [--read-values] [--json]
@@ -62,7 +65,7 @@ Diagnostics:
   amaran pair-test [--add] [--attention <0-255>] [--dry-run] [--verify] [--json]
   amaran proxy-test [--json]
   amaran sig-onoff-test <on|off> [--node <id|name>] [--json]
-  amaran control-test <on|off|intensity|cct> [value] [--intensity <0-100>] [--node <id|name>] [--json]
+  amaran control-test <on|off|intensity|cct|raw> [value] [--intensity <0-100>] [--gm <0-20>] [--node <id|name>] [--json]
   amaran status-test [--node <id|name>] [--json]
   amaran configure-test [--node <id|name>] [--json]
   amaran config-composition-get-test [--node <id|name>] [--json]
@@ -91,6 +94,8 @@ Options:
   --range <spec>     Address range for discover, such as 2-32 or 2-8,12.
   --update-state     For discover, keep newly responsive fixture entries in
                      local state. Without it, only sequence counters persist.
+  --gm <0-20>        Green-magenta correction for CCT-capable fixtures. 10 is
+                     neutral; lower is greener and higher is more magenta.
   --dry-run          For pair, preflight + scan only. For node reset, validate
                      and print the selected fixture without sending reset.
   --verify           For pair, read status after provisioning/config.
@@ -109,8 +114,10 @@ Stable runtime commands:
   identify   Blink the selected fixture three times, then restore state.
   on/off     Send Telink vendor on/off.
   intensity  Send Telink brightness, 0-100 percent.
-  cct        Send Telink CCT in Kelvin. Without --intensity, reads status first
-             and preserves the current intensity.
+  cct        Send Telink CCT in Kelvin. Reads status to preserve any omitted
+             intensity or green-magenta value.
+  gm         Send Telink green-magenta correction while preserving current CCT
+             and intensity.
 
 Runtime daemon:
   Runtime BLE commands auto-start a local BluetoothProbe.app daemon when one is
@@ -140,6 +147,8 @@ State and pairing:
   scene          Capture, list, show, and apply named fixture states. Capturing
                  reads live status; applying sends direct runtime commands.
   daemon         Start, inspect, or stop the local runtime daemon.
+  monitor        Subscribe to Mesh Proxy notifications for reverse-engineering
+                 runtime packets. Output is redacted and key-free.
 
 Diagnostics:
   gatt-probe                       Discover Mesh Proxy/Provisioning services.
@@ -152,7 +161,8 @@ Diagnostics:
   pair-test                   Diagnostic alias for pairing.
   proxy-test                  Write a public sample Mesh Proxy PDU.
   sig-onoff-test              Send standard Generic OnOff test PDU.
-  control-test                Send Telink 0x26 control PDU.
+  control-test                Send Telink 0x26 control PDU. raw accepts a
+                              10-byte packet hex with a valid checksum.
   status-test                 Read Telink 0x26 status.
   configure-test              Fetch composition, ensure AppKey, bind model.
   config-*-test               Individual Config Client diagnostics.
@@ -227,6 +237,7 @@ Examples:
   ./bin/amaran identify --node desk-key
   ./bin/amaran intensity 18
   ./bin/amaran cct 5600 --intensity 18
+  ./bin/amaran gm 10 --node tube-stage-left
 
 Safety:
   Runtime commands require local state and use the Bluetooth helper directly.
@@ -338,6 +349,11 @@ while [[ $# -gt 0 ]]; do
     --intensity)
       [[ $# -ge 2 ]] || { echo "amaran: --intensity requires a value" >&2; exit 1; }
       INTENSITY_OPT="$2"
+      shift 2
+      ;;
+    --gm)
+      [[ $# -ge 2 ]] || { echo "amaran: --gm requires a value from 0 to 20" >&2; exit 1; }
+      GM_OPT="$2"
       shift 2
       ;;
     --json)
@@ -465,6 +481,17 @@ if [[ "$DISCOVER_UPDATE_STATE" == "1" && "$COMMAND" != "discover" ]]; then
   exit 1
 fi
 
+if [[ -n "$GM_OPT" ]]; then
+  case "$COMMAND" in
+    cct|control-test)
+      ;;
+    *)
+      echo "amaran: --gm is only supported for cct and control-test cct" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 if [[ "$DRY_RUN" == "1" && "$CONFIRM_RESET" == "1" && "$COMMAND" == "config-node-reset-test" ]]; then
   echo "amaran: --dry-run cannot be used with --confirm-reset" >&2
   exit 1
@@ -473,7 +500,7 @@ fi
 launch_app() {
   local app="$1"
   shift
-  /usr/bin/open -W "$app" --args "$@"
+  /usr/bin/open -n -W "$app" --args "$@"
 }
 
 daemon_request() {
@@ -2609,10 +2636,14 @@ build_native_control_spec() {
     cct)
       [[ $# -ge 2 ]] || { echo "amaran: control-test cct requires a kelvin value" >&2; exit 1; }
       [[ -n "$INTENSITY_OPT" ]] || { echo "amaran: control-test cct requires --intensity <0-100>" >&2; exit 1; }
-      NATIVE_CONTROL_SPEC="cct:$2:$INTENSITY_OPT:10:0"
+      NATIVE_CONTROL_SPEC="cct:$2:$INTENSITY_OPT:${GM_OPT:-10}:0"
+      ;;
+    raw)
+      [[ $# -ge 2 ]] || { echo "amaran: control-test raw requires a 10-byte packet hex value" >&2; exit 1; }
+      NATIVE_CONTROL_SPEC="raw:$2"
       ;;
     *)
-      echo "amaran: control-test requires on, off, intensity, or cct" >&2
+      echo "amaran: control-test requires on, off, intensity, cct, or raw" >&2
       exit 1
       ;;
   esac
@@ -2779,6 +2810,8 @@ if cct.get("intensity") is not None:
     parts.append(f"intensity {cct['intensity'] / 10:g}%")
 if cct.get("cct_kelvin") is not None:
     parts.append(f"cct {cct['cct_kelvin']}K")
+if cct.get("gm_decoded") is not None:
+    parts.append(f"gm {cct['gm_decoded']}")
 if "sleep_mode" in cct:
     parts.append(f"sleep_mode {cct['sleep_mode']}")
 print(", ".join(parts))
@@ -3384,6 +3417,92 @@ capture_native_status_json() {
 
 build_native_cct_spec_from_status() {
   local kelvin="$1"
+  local required_status=0
+  if [[ -z "$INTENSITY_OPT" || -z "$GM_OPT" ]]; then
+    required_status=1
+  fi
+  local status_json
+  status_json="{}"
+  if [[ "$required_status" == "1" ]]; then
+    local error_output
+    error_output="$(mktemp -t amaran-status-error)"
+    if ! status_json="$(capture_native_status_json 2>"$error_output")"; then
+      cat "$error_output" >&2
+      rm -f "$error_output"
+      return 1
+    fi
+    rm -f "$error_output"
+  fi
+
+  local spec
+  local parse_error
+  parse_error="$(mktemp -t amaran-status-parse-error)"
+  if ! spec="$(STATUS_JSON="$status_json" /usr/bin/python3 - "$kelvin" "$INTENSITY_OPT" "$GM_OPT" 2>"$parse_error" <<'PY'
+import json
+import os
+import sys
+
+kelvin, intensity_arg, gm_arg = sys.argv[1:4]
+try:
+    payload = json.loads(os.environ["STATUS_JSON"])
+except (KeyError, json.JSONDecodeError):
+    print("amaran: status returned invalid JSON", file=sys.stderr)
+    sys.exit(1)
+
+cct = payload.get("cct") or {}
+
+def parse_percent(value):
+    try:
+        number = float(value)
+    except ValueError:
+        print("amaran: --intensity must be between 0 and 100", file=sys.stderr)
+        sys.exit(1)
+    if number < 0 or number > 100:
+        print("amaran: --intensity must be between 0 and 100", file=sys.stderr)
+        sys.exit(1)
+    return number
+
+def parse_gm(value):
+    try:
+        number = int(value)
+    except ValueError:
+        print("amaran: --gm must be an integer from 0 to 20", file=sys.stderr)
+        sys.exit(1)
+    if number < 0 or number > 20:
+        print("amaran: --gm must be an integer from 0 to 20", file=sys.stderr)
+        sys.exit(1)
+    return number
+
+if intensity_arg:
+    intensity_percent = parse_percent(intensity_arg)
+else:
+    intensity = cct.get("intensity")
+    if intensity is None:
+        print("amaran: status did not include current intensity", file=sys.stderr)
+        sys.exit(1)
+    intensity_percent = float(intensity) / 10.0
+
+if gm_arg:
+    gm = parse_gm(gm_arg)
+    gm_flag = 0
+else:
+    gm = cct.get("gm", 10)
+    gm_flag = cct.get("gm_flag", 0)
+
+print(f"cct:{kelvin}:{intensity_percent:g}:{int(gm)}:{int(gm_flag)}")
+PY
+  )"; then
+    cat "$parse_error" >&2
+    rm -f "$parse_error"
+    return 1
+  fi
+  rm -f "$parse_error"
+
+  NATIVE_CONTROL_SPEC="$spec"
+}
+
+build_native_gm_spec_from_status() {
+  local gm_value="$1"
   local status_json
   local error_output
   error_output="$(mktemp -t amaran-status-error)"
@@ -3397,27 +3516,37 @@ build_native_cct_spec_from_status() {
   local spec
   local parse_error
   parse_error="$(mktemp -t amaran-status-parse-error)"
-  if ! spec="$(STATUS_JSON="$status_json" /usr/bin/python3 - "$kelvin" 2>"$parse_error" <<'PY'
+  if ! spec="$(STATUS_JSON="$status_json" /usr/bin/python3 - "$gm_value" 2>"$parse_error" <<'PY'
 import json
 import os
 import sys
 
-kelvin = sys.argv[1]
+gm_arg = sys.argv[1]
 try:
     payload = json.loads(os.environ["STATUS_JSON"])
 except (KeyError, json.JSONDecodeError):
     print("amaran: status returned invalid JSON", file=sys.stderr)
     sys.exit(1)
 
+try:
+    gm = int(gm_arg)
+except ValueError:
+    print("amaran: gm must be an integer from 0 to 20", file=sys.stderr)
+    sys.exit(1)
+if gm < 0 or gm > 20:
+    print("amaran: gm must be an integer from 0 to 20", file=sys.stderr)
+    sys.exit(1)
+
 cct = payload.get("cct") or {}
+kelvin = cct.get("cct")
 intensity = cct.get("intensity")
+if kelvin is None:
+    print("amaran: status did not include current CCT", file=sys.stderr)
+    sys.exit(1)
 if intensity is None:
     print("amaran: status did not include current intensity", file=sys.stderr)
     sys.exit(1)
-
-gm = cct.get("gm", 10)
-gm_flag = cct.get("gm_flag", 0)
-print(f"cct:{kelvin}:{intensity / 10:g}:{int(gm)}:{int(gm_flag)}")
+print(f"cct:{int(kelvin)}:{float(intensity) / 10:g}:{gm}:0")
 PY
   )"; then
     cat "$parse_error" >&2
@@ -3510,8 +3639,10 @@ run_control_command() {
     return 1
   fi
 
-  if [[ "$action" == "cct" && -z "$INTENSITY_OPT" ]]; then
+  if [[ "$action" == "cct" ]]; then
     build_native_cct_spec_from_status "$1"
+  elif [[ "$action" == "gm" ]]; then
+    build_native_gm_spec_from_status "$1"
   else
     build_native_control_spec "$action" "$@"
   fi
@@ -3738,6 +3869,99 @@ PY
   esac
 }
 
+run_monitor_command() {
+  if [[ ! -s "$STATE_PATH" ]]; then
+    echo "amaran: monitor requires local state at $STATE_PATH" >&2
+    return 1
+  fi
+
+  local output
+  output="$(mktemp -t amaran-monitor)"
+  local args=(--output "$output" --timeout "$TIMEOUT" --state-path "$STATE_PATH")
+  if [[ -n "$NODE_ID" ]]; then
+    args+=(--node "$NODE_ID")
+  fi
+  args+=(--monitor)
+
+  launch_app "$NATIVE_APP" "${args[@]}"
+
+  if [[ ! -s "$output" ]]; then
+    rm -f "$output"
+    echo "amaran: monitor did not write a result" >&2
+    return 1
+  fi
+
+  /usr/bin/python3 - "$JSON" "$output" <<'PY'
+import json
+import sys
+
+raw_json, output = sys.argv[1] == "1", sys.argv[2]
+with open(output, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+if not payload.get("ok"):
+    detail = payload.get("error") or "monitor failed"
+    print(f"amaran: {detail}", file=sys.stderr)
+    sys.exit(1)
+
+data = payload.get("data", {})
+if raw_json:
+    print(json.dumps(data, indent=2))
+    sys.exit(0)
+
+monitor = data.get("monitor") or {}
+notifications = data.get("proxy_notifications") or []
+print(f"monitor captured {len(notifications)} notifications")
+for index, notification in enumerate(notifications, start=1):
+    network = notification.get("network") or {}
+    access = notification.get("access") or {}
+    telink = access.get("telink") or {}
+    parts = [f"#{index}"]
+    if network:
+        parts.append(f"src {network.get('source')}")
+        parts.append(f"dst {network.get('destination')}")
+    if access:
+        parts.append(f"opcode {access.get('opcode')}")
+        if access.get("company_id"):
+            parts.append(f"company {access.get('company_id')}")
+        if access.get("vendor_opcode") is not None:
+            parts.append(f"vendor_opcode {access.get('vendor_opcode')}")
+        if access.get("parameters_hex"):
+            parts.append(f"params {access.get('parameters_hex')}")
+    if telink:
+        parts.append(f"telink_cmd {telink.get('command_type')}")
+        if telink.get("opera_type") is not None:
+            parts.append(f"opera {telink.get('opera_type')}")
+        if telink.get("checksum_valid") is not None:
+            parts.append(f"checksum {'ok' if telink.get('checksum_valid') else 'bad'}")
+        cct = telink.get("cct") or {}
+        if cct:
+            if cct.get("intensity_percent") is not None:
+                parts.append(f"intensity {cct.get('intensity_percent'):g}%")
+            if cct.get("cct_kelvin") is not None:
+                parts.append(f"cct {cct.get('cct_kelvin')}K")
+            if cct.get("gm_decoded") is not None:
+                parts.append(f"gm {cct.get('gm_decoded')}")
+        color = telink.get("color") or {}
+        if color:
+            if color.get("hue_candidate") is not None:
+                parts.append(f"hue? {color.get('hue_candidate')}")
+            if color.get("saturation_candidate") is not None:
+                parts.append(f"sat? {color.get('saturation_candidate')}")
+            if color.get("mode_candidate") is not None:
+                parts.append(f"mode? {color.get('mode_candidate')}")
+    elif notification.get("type"):
+        parts.append(f"type {notification.get('type')}")
+    print("  " + ", ".join(str(part) for part in parts))
+if not notifications:
+    duration = monitor.get("duration", "unknown")
+    print(f"no decoded mesh notifications seen during {duration}s window")
+PY
+  local helper_status=$?
+  rm -f "$output"
+  return "$helper_status"
+}
+
 case "$COMMAND" in
   doctor)
     run_direct_doctor
@@ -3782,7 +4006,11 @@ case "$COMMAND" in
     esac
     ;;
   control-test)
-    [[ ${#POSITIONALS[@]} -ge 1 ]] || { echo "amaran: control-test requires on, off, intensity, or cct" >&2; exit 1; }
+    [[ ${#POSITIONALS[@]} -ge 1 ]] || { echo "amaran: control-test requires on, off, intensity, cct, or raw" >&2; exit 1; }
+    if [[ -n "$GM_OPT" && "$POSITIONALS[1]" != "cct" ]]; then
+      echo "amaran: --gm is only supported for control-test cct" >&2
+      exit 1
+    fi
     run_native_control_test "${POSITIONALS[@]}"
     ;;
   status-test)
@@ -3824,6 +4052,9 @@ case "$COMMAND" in
   daemon)
     run_daemon_command
     ;;
+  monitor)
+    run_monitor_command
+    ;;
   list)
     run_list_command
     ;;
@@ -3852,7 +4083,18 @@ case "$COMMAND" in
     else
       run_control_command cct "$POSITIONALS[1]"
     fi
-    [[ "$JSON" == "1" ]] || echo "cct $POSITIONALS[1]K"
+    if [[ "$JSON" != "1" ]]; then
+      cct_summary="cct $POSITIONALS[1]K"
+      if [[ -n "$GM_OPT" ]]; then
+        cct_summary="$cct_summary gm $GM_OPT"
+      fi
+      echo "$cct_summary"
+    fi
+    ;;
+  gm)
+    [[ ${#POSITIONALS[@]} -ge 1 ]] || { echo "amaran: gm requires a value from 0 to 20" >&2; exit 1; }
+    run_control_command gm "$POSITIONALS[1]"
+    [[ "$JSON" == "1" ]] || echo "gm $POSITIONALS[1]"
     ;;
   *)
     echo "amaran: unknown direct command: $COMMAND" >&2
