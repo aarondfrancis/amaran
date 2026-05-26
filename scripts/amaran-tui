@@ -529,6 +529,10 @@ class CompactButton(Static):
         self.render_label()
 
     def activate(self):
+        screen = getattr(self, "screen", None)
+        if hasattr(screen, "handle_compact_button"):
+            screen.handle_compact_button(self.id)
+            return
         app = self.app
         if hasattr(app, "handle_action_button"):
             app.handle_action_button(self.id)
@@ -568,7 +572,7 @@ class DeleteSceneModal(ModalScreen):
     }
 
     #delete-actions {
-        height: 3;
+        height: 2;
         padding: 1 0 0 0;
     }
 
@@ -587,12 +591,11 @@ class DeleteSceneModal(ModalScreen):
             yield Static("Delete Scene", id="delete-title")
             yield Static(f"Delete saved scene '{self.scene_name}'?", id="delete-message")
             with Horizontal(id="delete-actions"):
-                yield Button("Delete", id="delete-confirm", variant="error")
-                yield Button("Cancel", id="delete-cancel")
+                yield CompactButton("Delete", id="delete-confirm", classes="action-error")
+                yield CompactButton("Cancel", id="delete-cancel", classes="action-neutral")
 
-    @on(Button.Pressed)
-    def button_pressed(self, event):
-        if event.button.id == "delete-confirm":
+    def handle_compact_button(self, control_id):
+        if control_id == "delete-confirm":
             self.dismiss(True)
         else:
             self.dismiss(False)
