@@ -339,6 +339,7 @@ class AmaranTui(App):
         self.status_timeout = self._status_timeout()
         self.fixtures: Dict[int, FixtureView] = {}
         self.fixture_order: List[int] = []
+        self.selected_address: Optional[int] = None
         self.scenes: List[SceneView] = []
         self.scene_order: List[str] = []
         self.refresh_all_task = None
@@ -500,6 +501,8 @@ class AmaranTui(App):
                 fixture.updated_at = prior.updated_at
             self.fixtures[address] = fixture
             self.fixture_order.append(address)
+        if self.selected_address not in self.fixtures:
+            self.selected_address = self.fixture_order[0] if self.fixture_order else None
         self.render_fixtures()
         self.append_log(f"loaded {len(self.fixture_order)} fixtures")
 
@@ -529,6 +532,7 @@ class AmaranTui(App):
 
     def render_fixtures(self):
         table = self.query_one("#fixtures", DataTable)
+        selected_address = self.selected_address
         table.clear()
         for address in self.fixture_order:
             fixture = self.fixtures[address]
@@ -542,6 +546,8 @@ class AmaranTui(App):
                 str(fixture.gm) if fixture.gm is not None else "?",
                 key=str(address),
             )
+        if selected_address in self.fixtures and selected_address in self.fixture_order:
+            table.move_cursor(row=self.fixture_order.index(selected_address), column=0, animate=False, scroll=False)
 
     def render_scenes(self):
         table = self.query_one("#scenes", DataTable)
@@ -569,11 +575,33 @@ class AmaranTui(App):
         return f"{int(value)}%"
 
     def current_fixture(self):
+        if self.selected_address in self.fixtures:
+            return self.fixtures[self.selected_address]
         if not self.fixture_order:
+            self.selected_address = None
             return None
         table = self.query_one("#fixtures", DataTable)
         row = max(0, min(table.cursor_row, len(self.fixture_order) - 1))
-        return self.fixtures.get(self.fixture_order[row])
+        self.selected_address = self.fixture_order[row]
+        return self.fixtures.get(self.selected_address)
+
+    def update_selected_fixture_from_table(self, event=None):
+        if event is not None:
+            row_key = getattr(event, "row_key", None)
+            value = getattr(row_key, "value", None)
+            try:
+                address = int(value)
+            except (TypeError, ValueError):
+                address = None
+            if address in self.fixtures:
+                self.selected_address = address
+                return
+        if not self.fixture_order:
+            self.selected_address = None
+            return
+        table = self.query_one("#fixtures", DataTable)
+        row = max(0, min(table.cursor_row, len(self.fixture_order) - 1))
+        self.selected_address = self.fixture_order[row]
 
     def current_scene(self):
         if not self.scene_order:
@@ -817,11 +845,13 @@ class AmaranTui(App):
             self.append_log(f"scene capture failed: {exc.message}")
 
     @on(DataTable.RowHighlighted, "#fixtures")
-    def fixture_highlighted(self, _event):
+    def fixture_highlighted(self, event):
+        self.update_selected_fixture_from_table(event)
         self.update_selected_panel()
 
     @on(DataTable.RowSelected, "#fixtures")
-    def fixture_selected(self, _event):
+    def fixture_selected(self, event):
+        self.update_selected_fixture_from_table(event)
         self.update_selected_panel()
 
     @on(DataTable.RowSelected, "#scenes")
