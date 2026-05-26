@@ -437,7 +437,7 @@ class AmaranTui(App):
     #scene-name {
         width: 1fr;
         padding: 0;
-        margin: 0 1 0 0;
+        margin: 0 1 0 1;
     }
 
     #capture-scene {
