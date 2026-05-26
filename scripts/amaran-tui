@@ -492,6 +492,44 @@ class ValueBar(Static):
             event.stop()
 
 
+class CompactButton(Static):
+    can_focus = True
+
+    def __init__(self, label, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.label = label
+
+    def on_mount(self):
+        self.render_label()
+
+    def render_label(self):
+        text = Text(self.label, style="bold")
+        if self.has_focus:
+            text.stylize("reverse")
+        self.update(text)
+
+    def on_focus(self):
+        self.render_label()
+
+    def on_blur(self):
+        self.render_label()
+
+    def activate(self):
+        app = self.app
+        if hasattr(app, "handle_action_button"):
+            app.handle_action_button(self.id)
+
+    def on_click(self, event):
+        self.focus()
+        self.activate()
+        event.stop()
+
+    def on_key(self, event):
+        if event.key in ("enter", "space"):
+            self.activate()
+            event.stop()
+
+
 def parse_terminal_background(response):
     match = re.search(r"\x1b]11;([^\x07\x1b]+)(?:\x07|\x1b\\)", response)
     if not match:
@@ -656,10 +694,41 @@ class AmaranTui(App):
     }
 
     Button {
+        min-width: 10;
+        margin: 0 1 0 0;
+    }
+
+    CompactButton {
         height: 1;
-        min-width: 8;
+        width: 11;
         margin: 0 1 0 0;
         padding: 0 1;
+        content-align: center middle;
+        text-style: bold;
+    }
+
+    CompactButton.action-success {
+        background: $success;
+        color: $text;
+    }
+
+    CompactButton.action-error {
+        background: $error;
+        color: $text;
+    }
+
+    CompactButton.action-neutral {
+        background: $surface-lighten-1;
+        color: $text;
+    }
+
+    #power-on,
+    #power-off {
+        width: 8;
+    }
+
+    #refresh-selected {
+        width: 10;
     }
 
     ValueBar {
@@ -724,11 +793,11 @@ class AmaranTui(App):
                     yield ValueBar(id="cct", classes="pad")
                     yield ValueBar(id="gm", classes="pad")
                     with Horizontal(classes="controls-row"):
-                        yield Button("On", id="power-on", variant="success")
-                        yield Button("Off", id="power-off", variant="error")
-                        yield Button("Refresh", id="refresh-selected")
-                        yield Button("Identify", id="identify")
-                        yield Button("Capture", id="capture-include")
+                        yield CompactButton("On", id="power-on", classes="action-success")
+                        yield CompactButton("Off", id="power-off", classes="action-error")
+                        yield CompactButton("Refresh", id="refresh-selected", classes="action-neutral")
+                        yield CompactButton("Identify", id="identify", classes="action-neutral")
+                        yield CompactButton("Capture", id="capture-include", classes="action-neutral")
                 with Vertical(id="scenes-panel"):
                     yield Static("Scenes", classes="panel-title")
                     yield SceneList(id="scenes")
@@ -1196,6 +1265,22 @@ class AmaranTui(App):
 
     def schedule(self, coro):
         asyncio.create_task(coro)
+
+    def handle_action_button(self, control_id):
+        if control_id == "refresh-selected":
+            self.schedule(self.action_refresh_selected())
+        elif control_id == "power-on":
+            fixture = self.current_fixture()
+            if fixture:
+                self.schedule(self.control_fixture(fixture, "on"))
+        elif control_id == "power-off":
+            fixture = self.current_fixture()
+            if fixture:
+                self.schedule(self.control_fixture(fixture, "off"))
+        elif control_id == "identify":
+            self.schedule(self.action_identify())
+        elif control_id == "capture-include":
+            self.action_toggle_capture_include()
 
     async def action_refresh_selected(self):
         fixture = self.current_fixture()
